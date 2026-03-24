@@ -1,29 +1,19 @@
 # Zfs Root Menu
 
-`zfs-root-menu.sh` installs Debian Trixie onto a mirrored two-disk ZFS root and configures ZFSBootMenu for booting the installed environment.
+`zfs-root-menu.sh` installs Debian Trixie onto a mirrored two-disk ZFS root and configures ZFSBootMenu to boot the installed environment.
 
-It is destructive. The matched disks are repartitioned and wiped.
-
-<!-- TODO:
-
-Why are we building the ZFS module twice in the zfs-root-menu.sh script now that we are adding zfs to the ISO during remastering?
-
-  - can't we just check if it is installed in the live environment and skip the first build if it is?
-  - likewise in --repair-chroot mode can't we just chroot and check if the installed system's ZFS module is already built before trying to build it again?
-
--->
+It is destructive. The two matched disks are repartitioned and wiped.
 
 ## What It Does
 
 - Matches exactly two target disks by name/model substring and size substring.
 - Creates mirrored EFI and ZFS partitions on both disks.
-- Creates a mirrored `zroot` pool.
-- Creates the root and common child datasets.
+- Creates a mirrored `zroot` pool with common child datasets.
 - Bootstraps Debian Trixie into the ZFS root.
-- Installs kernel, headers, DKMS, ZFS userspace, `dracut`, and `zfs-dracut` inside the target system.
-- Builds a custom ZFSBootMenu EFI image locally inside the target system, with fallback UEFI path `EFI/BOOT/BOOTX64.EFI`.
-- Configures ZFSBootMenu remote SSH access when an authorized_keys file is available in the live environment.
-- Creates UEFI boot entries for both ESPs.
+- Installs kernel, headers, DKMS, ZFS userspace, `initramfs-tools`, and `zfs-initramfs` inside the target.
+- Builds a custom source-built `dracut` + `dracut-crypt-ssh` based ZFSBootMenu image inside the target.
+- Configures ZFSBootMenu remote SSH access when an authorized keys file is available in the live environment.
+- Creates UEFI boot entries for both ESPs and the fallback path `EFI/BOOT/BOOTX64.EFI`.
 
 ## Requirements
 
@@ -60,6 +50,7 @@ Options:
 - `--hostname NAME`: Target hostname. Default: `stein`.
 - `--release NAME`: Debian release. Default: `trixie`.
 - `--mountpoint PATH`: Temporary install mountpoint. Default: `/mnt`.
+- `--repair-chroot`: Re-enter an existing install from the live ISO and rebuild the target-side boot stack.
 - `--dry-run`: Print matched drives and planned partition devices, then exit without making changes.
 - `--help`: Show usage.
 
@@ -74,9 +65,7 @@ It requires exactly two matches. If the filter matches fewer or more than two di
 
 ## Non-Interactive Package Installs
 
-APT and DKMS-related package installation are configured to run non-interactively, including the ZFS DKMS license prompt handling, both in the live environment and inside the target chroot.
-
-The final password step is still intended to be interactive.
+APT and DKMS-related package installation are configured to run non-interactively, including ZFS DKMS licensing. Boot-critical target package steps are intentionally strict now; the script should fail rather than continue with a bad initramfs.
 
 ## Password Behavior
 
@@ -100,11 +89,11 @@ The installer writes ZFSBootMenu to:
 - `\EFI\ZBM\VMLINUZ-BACKUP.EFI`
 - `\EFI\BOOT\BOOTX64.EFI`
 
-That fallback `BOOTX64.EFI` path is important for firmware that ignores or loses the explicit NVRAM boot entry.
+That fallback `BOOTX64.EFI` path matters for firmware that ignores or loses explicit NVRAM entries.
 
 ## ZFSBootMenu SSH Access
 
-The installer now builds a custom ZFSBootMenu image inside the target chroot instead of downloading a generic prebuilt EFI image.
+The installer builds a custom ZFSBootMenu image inside the target chroot.
 
 When an authorized keys file is available in the live environment, the installer copies it into the target and configures Dropbear-based remote access in the generated ZFSBootMenu image.
 
@@ -113,19 +102,15 @@ Authorized keys source order during install:
 - `/root/.ssh/authorized_keys`
 - `/home/user/.ssh/authorized_keys`
 
-This is intended to make the same SSH key you used for the remastered live ISO available for remote access to ZFSBootMenu.
+Expected behavior:
 
-The generated image is configured with network bring-up via DHCP and includes the `crypt-ssh` dracut module.
-
-Expected remote-access behavior:
-
-- SSH into ZFSBootMenu using your public key
-- from the remote shell, launch the menu with `zfsbootmenu` if needed
-- the remote-access port is determined by the bundled Dropbear/dracut setup and is typically `222`
+- ZFSBootMenu Dropbear listens on guest port `222`.
+- Login is as `root`, not `user`.
+- The authorized key must be present in the generated image, or SSH will fail with `Permission denied (publickey)`.
 
 ## Remaster Workflow
 
-The repo includes a Trixie-chroot-based remaster workflow that embeds the installer into a Debian live ISO instead of relying on the host toolchain for the actual remastering steps.
+The repo includes a Trixie-chroot-based remaster workflow.
 
 Host wrapper:
 
@@ -138,7 +123,7 @@ What it does:
 - creates or reuses `./.remaster-chroot`
 - bootstraps a Debian Trixie remaster environment with `debootstrap`
 - installs remaster tools inside that chroot
-- runs the actual ISO extraction, customization, and repack entirely inside the Trixie chroot
+- runs ISO extraction, customization, and repack entirely inside the Trixie chroot
 
 The wrapper looks for the first `debian-live-*.iso` file or symlink in the repo root.
 
@@ -167,55 +152,66 @@ The remastered live ISO:
 - sets the live `user` password to `user`
 - enables `ssh.service`
 - enables password authentication for SSH
+- mounts `devpts` using a systemd mount unit so PTY-dependent tools keep working after boot
+- bakes in live-environment ZFS support instead of rebuilding it during installer runtime
 
 Optional SSH public key support:
 
 - pass `--authorized-keys-url URL` to `./tools/remaster-livecd.sh`
 - if `--authorized-keys-url` is not provided, the wrapper falls back to `./ssh_id.pub` if that file or symlink resolves to a real host file
 
-The wrapper resolves or downloads the key on the host side first, copies it into the remaster chroot, and only then the inner remaster step installs it into the live filesystem.
-
 If a valid key is available, it is added to:
 
 - `/home/user/.ssh/authorized_keys`
 
-## VM Automation
+## VM Usage
 
-`definition.xml` now points at:
+The successful VM model from development was:
 
-- `/home/aok/Local/Projects/zfs-root-menu/build/zfs-root-menu-live.iso`
+- system libvirt mode, not session mode
+- one host-reachable NIC on `host-bridge`
+- one separate internet NIC using a real uplink-backed macvtap/macvlan attachment
 
-`setup.sh` now:
+Important operational notes:
 
-1. builds the remastered live ISO
-2. creates the qcow2 disks
-3. refreshes the OVMF NVRAM vars file
-4. defines the VM with libvirt
-5. starts the VM
+- `setup.sh` redefines the domain from `definition.xml` every run.
+- If you are using system libvirt, use `sudo virsh ...` for domain and network inspection.
+- The checked-in `definition.xml` must match your actual host network topology. A dead or unmanaged `virbr0` path caused repeated false network failures during development.
+- Macvlan/macvtap does not provide host-to-guest communication on the parent NIC path, so keep a separate host-access NIC if you need SSH from the host.
 
-The libvirt user-network interface forwards:
-- host `127.0.0.1:2222` to guest port `22` for the live ISO / installed system SSH
-- host `127.0.0.1:2223` to guest port `222` for ZFSBootMenu Dropbear SSH
-
-Examples:
+Example build/start:
 
 ```bash
-ssh -p 2222 user@127.0.0.1
-ssh -p 2223 root@127.0.0.1
+sudo ./setup.sh
+sudo ./setup.sh --authorized-keys-url file:///home/aok/.ssh/id_rsa.pub
 ```
 
-Example:
+Serial console access:
 
 ```bash
-./setup.sh
-./setup.sh --authorized-keys-url https://example.com/id_ed25519.pub
-./setup.sh --authorized-keys-url file:///home/aok/.ssh/id_rsa.pub
+sudo virsh console zfs-root-menu
 ```
+
+## Recovery Workflow
+
+When the live ISO is already booted and the target disks already contain an install, rebuild the target-side boot stack with:
+
+```bash
+sudo /home/user/zfs-root-menu.sh --repair-chroot
+```
+
+Use this after updating `zfs-root-menu.sh` in the live environment when you want to regenerate the target ZFSBootMenu image or target initramfs without repartitioning the disks again.
+
+## Known Pitfalls
+
+- PTYs can break if `/dev`, `/proc`, and `/sys` are bind-mounted into the target chroot without `rslave` propagation controls. This was fixed in the script, but it is the first thing to suspect if `sudo` starts failing after the installer runs.
+- ZFSBootMenu networking is sensitive to the actual VM NIC topology. The working path depended on loading the correct NIC drivers early and steering dracut toward the intended boot network.
+- A guest NIC can look configured inside the VM while still being unusable if the host-side bridge or libvirt network backing it is dead. Verify both guest routes and host attachment.
+- ZFSBootMenu Dropbear access is `root@...`, not `user@...`.
+- Hostid mismatches between the pool and `/etc/hostid` can cause confusing import behavior. The installer now writes `spl_hostid=` into the ZFSBootMenu command line to keep pool import consistent.
+- The installed system needs a real ZFS-capable initramfs. The script now installs `zfs-initramfs`, regenerates initramfs, and verifies that the generated `initrd.img-*` contains ZFS content before proceeding.
+- VM graphics were less reliable than serial during development. Treat `virsh console` as the authoritative early-boot view.
 
 ## Notes
-
-- The script contains rerun handling for stale ZFS pool state, but a badly interrupted run can still leave the live environment dirty enough that a reboot is the cleanest recovery.
-- If you are testing in a VM, `--dry-run` is the safest first check before any destructive run.
-- The remaster workflow is designed so the actual ISO manipulation happens inside the Trixie remaster chroot rather than against host-versioned remaster tools.
 
 For VM serial access, use `virsh console zfs-root-menu`. The installed system enables `serial-getty@ttyS0.service`, and the installer configures both ZFSBootMenu and the final kernel with `console=tty0 console=ttyS0,115200n8`.
