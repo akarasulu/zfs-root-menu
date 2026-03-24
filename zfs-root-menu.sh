@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+LOG_DIR=${ZRM_LOG_DIR:-/tmp}
+mkdir -p "$LOG_DIR"
+LOG_FILE=${ZRM_LOG_FILE:-$LOG_DIR/zfs-root-menu-$(date +%Y%m%d-%H%M%S).log}
+exec > >(tee -a "$LOG_FILE") 2>&1
+printf 'Logging to %s\n' "$LOG_FILE"
+
 ###############################################################################
 
 # Stein: Debian Trixie + ZFS mirror root + ZFSBootMenu
@@ -133,6 +139,8 @@ ROOT_DS="${POOL}/ROOT/${RELEASE}"
 NIC_DRIVERS=()
 BOOT_NET_IFACE=""
 BOOT_NET_MAC=""
+INSTALL_TIMEZONE=""
+ROOT_PASSWORD=${ROOT_PASSWORD:-root}
 
 collect_boot_network() {
   local route_iface mac
@@ -144,6 +152,26 @@ collect_boot_network() {
       BOOT_NET_MAC=$mac
     fi
   fi
+}
+
+detect_install_timezone() {
+  if [[ -n "${HOST_TIMEZONE:-}" ]]; then
+    INSTALL_TIMEZONE="$HOST_TIMEZONE"
+  elif [[ -s /etc/timezone ]]; then
+    INSTALL_TIMEZONE=$(cat /etc/timezone)
+  elif [[ -L /etc/localtime ]]; then
+    INSTALL_TIMEZONE=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')
+  else
+    INSTALL_TIMEZONE="UTC"
+  fi
+}
+
+ensure_time_sync() {
+  if command -v timedatectl >/dev/null 2>&1; then
+    timedatectl set-ntp true >/dev/null 2>&1 || true
+  fi
+  systemctl restart systemd-timesyncd >/dev/null 2>&1 || true
+  sleep 2
 }
 
 collect_nic_drivers() {
@@ -223,6 +251,8 @@ prepare_existing_target() {
   log "Preparing existing target at $MNT"
 
   ensure_live_zfs_tools
+  detect_install_timezone
+  ensure_time_sync
 
   if ! zpool list "$POOL" >/dev/null 2>&1; then
     zpool import -N -R "$MNT" "$POOL" >/dev/null 2>&1       || zpool import -f -N -R "$MNT" "$POOL" >/dev/null 2>&1       || zpool import -N -R "$MNT" >/dev/null 2>&1       || zpool import -f -N -R "$MNT" >/dev/null 2>&1       || die "Could not import existing pool $POOL"
@@ -278,6 +308,7 @@ if (( REPAIR_CHROOT == 0 )); then
   done
   collect_nic_drivers
   collect_boot_network
+  detect_install_timezone
   log "Matched install disks: $DISK1 and $DISK2"
   print_matched_disks
   if (( DRY_RUN == 1 )); then
@@ -291,6 +322,8 @@ if (( REPAIR_CHROOT == 0 )); then
   # FIX APT (DEBIAN LIVE)
 
   ############################################
+
+  ensure_time_sync
 
   log "Resetting APT sources"
 
@@ -479,9 +512,13 @@ fi
 
 run_target_chroot_config() {
 local nic_drivers_env="${NIC_DRIVERS[*]:-}"
-chroot "$MNT" /usr/bin/env RELEASE="$RELEASE" INSTALL_HOSTNAME="$HOSTNAME" ESP1="$ESP1" ESP2="$ESP2" DISK1="$DISK1" DISK2="$DISK2" NIC_DRIVERS="$nic_drivers_env" BOOT_NET_IFACE="$BOOT_NET_IFACE" BOOT_NET_MAC="$BOOT_NET_MAC" SKIP_ESP_FORMAT="${SKIP_ESP_FORMAT:-0}" /bin/bash <<'EOF_CHROOT'
+chroot "$MNT" /usr/bin/env RELEASE="$RELEASE" INSTALL_HOSTNAME="$HOSTNAME" INSTALL_TIMEZONE="$INSTALL_TIMEZONE" ROOT_PASSWORD="$ROOT_PASSWORD" ESP1="$ESP1" ESP2="$ESP2" DISK1="$DISK1" DISK2="$DISK2" NIC_DRIVERS="$nic_drivers_env" BOOT_NET_IFACE="$BOOT_NET_IFACE" BOOT_NET_MAC="$BOOT_NET_MAC" POOL="$POOL" SKIP_ESP_FORMAT="${SKIP_ESP_FORMAT:-0}" /bin/bash <<'EOF_CHROOT'
 set -e
 export DEBIAN_FRONTEND=noninteractive
+mkdir -p /var/log
+CHROOT_LOG=${ZRM_CHROOT_LOG:-/var/log/zfs-root-menu-chroot.log}
+exec > >(tee -a "$CHROOT_LOG") 2>&1
+printf 'Logging to %s\n' "$CHROOT_LOG"
 
 cat > /etc/apt/sources.list <<APT_CHROOT
 deb http://deb.debian.org/debian ${RELEASE} main contrib non-free non-free-firmware
@@ -496,6 +533,16 @@ zfs-dkms zfs-dkms/stop build failure boolean true
 EOF_DEBCONF
 fi
 
+if [[ -n "${INSTALL_TIMEZONE:-}" && -e "/usr/share/zoneinfo/${INSTALL_TIMEZONE}" ]]; then
+  ln -snf "/usr/share/zoneinfo/${INSTALL_TIMEZONE}" /etc/localtime
+  printf '%s\n' "${INSTALL_TIMEZONE}" > /etc/timezone
+fi
+
+printf '%s\n' 'en_US.UTF-8 UTF-8' > /etc/locale.gen
+locale-gen en_US.UTF-8
+update-locale LANG=en_US.UTF-8 LC_TIME=en_US.UTF-8 LC_NUMERIC=en_US.UTF-8
+export LANG=en_US.UTF-8 LC_TIME=en_US.UTF-8 LC_NUMERIC=en_US.UTF-8
+
 mkdir -p /tmp
 chmod 1777 /tmp
 mkdir -p /var/lib/dpkg /var/lib/apt/lists/partial /var/cache/apt/archives/partial
@@ -503,7 +550,7 @@ touch /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend
 
 apt-get update
 
-apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold initramfs-tools linux-image-amd64 linux-headers-amd64 build-essential dkms zfs-dkms zfsutils-linux zfs-initramfs openssh-server openssh-client efibootmgr dosfstools rsync curl git fzf mbuffer kexec-tools libsort-versions-perl libboolean-perl libyaml-pp-perl systemd systemd-sysv systemd-boot-efi dbus dbus-broker iproute2 isc-dhcp-client iputils-arping bsdextrautils dropbear libblkid-dev pkgconf libkmod-dev libudev-dev libsystemd-dev asciidoc xmlto docbook-xml docbook-xsl
+apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold initramfs-tools console-setup locales zstd apparmor linux-image-amd64 linux-headers-amd64 build-essential dkms zfs-dkms zfsutils-linux zfs-initramfs openssh-server openssh-client efibootmgr dosfstools rsync curl git fzf mbuffer kexec-tools libsort-versions-perl libboolean-perl libyaml-pp-perl systemd systemd-sysv systemd-boot-efi dbus dbus-broker iproute2 isc-dhcp-client iputils-arping bsdextrautils dropbear libblkid-dev pkgconf libkmod-dev libudev-dev libsystemd-dev asciidoc xmlto docbook-xml docbook-xsl
 apt-get -f install -y
 dpkg --configure -a
 printf 'REMAKE_INITRD=yes\n' > /etc/dkms/zfs.conf
@@ -661,7 +708,7 @@ WantedBy=multi-user.target
 PATH
 
 systemctl enable efi-sync.path
-systemctl start efi-sync.service
+/usr/local/sbin/sync-efi.sh
 
 ############################################
 
@@ -678,10 +725,7 @@ efibootmgr -c -d "$DISK2" -p 1 -L "ZFSBootMenu Mirror" -l '\EFI\ZBM\VMLINUZ-BACK
 
 ############################################
 
-if ! passwd root; then
-  echo 'passwd failed; setting default root password to root' >&2
-  echo 'root:root' | chpasswd
-fi
+printf 'root:%s\n' "${ROOT_PASSWORD:-root}" | chpasswd
 EOF_CHROOT
 }
 

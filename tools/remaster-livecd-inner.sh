@@ -21,6 +21,7 @@ SOURCE_ISO_URL=${SOURCE_ISO_URL:-}
 REPO_ROOT=""
 OUTPUT_ISO=""
 AUTHORIZED_KEYS_FILE=""
+HOST_TIMEZONE=${HOST_TIMEZONE:-UTC}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -156,7 +157,7 @@ mount --bind /dev/pts "$ROOTFS_DIR/dev/pts"
 mount --bind /proc "$ROOTFS_DIR/proc"
 mount --bind /sys "$ROOTFS_DIR/sys"
 
-chroot "$ROOTFS_DIR" /usr/bin/env DEBIAN_FRONTEND=noninteractive AUTHORIZED_KEYS_FILE="$AUTHORIZED_KEYS_FILE" /bin/bash <<'EOF_CHROOT'
+chroot "$ROOTFS_DIR" /usr/bin/env DEBIAN_FRONTEND=noninteractive AUTHORIZED_KEYS_FILE="$AUTHORIZED_KEYS_FILE" HOST_TIMEZONE="$HOST_TIMEZONE" /bin/bash <<'EOF_CHROOT'
 set -Eeuo pipefail
 
 rm -rf /etc/apt/sources.list.d/* || true
@@ -168,8 +169,12 @@ APT
 
 apt-get clean
 apt-get update
+if [[ -n "${HOST_TIMEZONE:-}" && -e "/usr/share/zoneinfo/${HOST_TIMEZONE}" ]]; then
+  ln -snf "/usr/share/zoneinfo/${HOST_TIMEZONE}" /etc/localtime
+  printf '%s\n' "${HOST_TIMEZONE}" > /etc/timezone
+fi
 LIVE_KERNEL=$(basename /lib/modules/*)
-apt-get install -y openssh-server sudo curl ca-certificates build-essential dkms "linux-headers-${LIVE_KERNEL}" zfs-dkms zfsutils-linux
+apt-get install -y openssh-server sudo curl ca-certificates systemd-timesyncd efibootmgr build-essential dkms "linux-headers-${LIVE_KERNEL}" zfs-dkms zfsutils-linux
 apt-get -f install -y
 if command -v dkms >/dev/null 2>&1; then
   dkms autoinstall -k "$LIVE_KERNEL" || true
@@ -185,6 +190,59 @@ usermod -aG sudo user || true
 printf 'user:user\n' | chpasswd
 
 install -d -m 700 -o user -g user /home/user/.ssh
+install -d -m 700 -o user -g user /home/user/.config
+cat > /home/user/.config/kscreenlockerrc <<'KSCREENLOCK'
+[Daemon]
+Autolock=false
+LockOnResume=false
+Timeout=0
+KSCREENLOCK
+chown user:user /home/user/.config/kscreenlockerrc
+chmod 600 /home/user/.config/kscreenlockerrc
+
+cat > /home/user/.config/powermanagementprofilesrc <<'POWERDEVIL'
+[AC][DimDisplay]
+idleTime=0
+
+[AC][DPMSControl]
+idleTime=0
+
+[AC][HandleButtonEvents]
+lidAction=32
+
+[AC][SuspendAndShutdown]
+autoSuspendAction=0
+autoSuspendIdleTimeoutSec=0
+
+[Battery][DimDisplay]
+idleTime=0
+
+[Battery][DPMSControl]
+idleTime=0
+
+[Battery][HandleButtonEvents]
+lidAction=32
+
+[Battery][SuspendAndShutdown]
+autoSuspendAction=0
+autoSuspendIdleTimeoutSec=0
+
+[LowBattery][DimDisplay]
+idleTime=0
+
+[LowBattery][DPMSControl]
+idleTime=0
+
+[LowBattery][HandleButtonEvents]
+lidAction=32
+
+[LowBattery][SuspendAndShutdown]
+autoSuspendAction=0
+autoSuspendIdleTimeoutSec=0
+POWERDEVIL
+chown user:user /home/user/.config/powermanagementprofilesrc
+chmod 600 /home/user/.config/powermanagementprofilesrc
+
 if [[ -n "${AUTHORIZED_KEYS_FILE:-}" && -f "${AUTHORIZED_KEYS_FILE:-}" ]]; then
   install -m 600 -o user -g user "$AUTHORIZED_KEYS_FILE" /home/user/.ssh/authorized_keys
   chown user:user /home/user/.ssh/authorized_keys
@@ -220,6 +278,7 @@ WantedBy=local-fs.target
 UNIT
 
 systemctl enable dev-pts.mount || true
+systemctl enable systemd-timesyncd || true
 systemctl enable ssh.service || true
 EOF_CHROOT
 

@@ -12,5 +12,7 @@ qemu-img create -f qcow2 disk2.qcow2 -o preallocation=metadata 20G
 cp /usr/share/OVMF/OVMF_VARS.fd "$ROOT_DIR/NVRAM_VARS.fd"
 virsh define ./definition.xml
 virsh start zfs-root-menu
-printf 'Domain started. Connect using your configured bridge IP or serial console.\n'
-printf 'Serial console: virsh console zfs-root-menu\n'
+printf 'Domain started under qemu:///system.\n'
+printf 'Serial console: sudo virsh -c qemu:///system console zfs-root-menu\n'
+printf 'Live ISO login: user / user\n'
+printf 'SSH to the live ISO using the guest IP on your host-access network.\n'

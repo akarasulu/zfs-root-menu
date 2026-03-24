@@ -6,7 +6,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)
 ROOT_DIR=$(cd -- "$SCRIPT_DIR/.." && pwd)
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
-  exec sudo --preserve-env=AUTHORIZED_KEYS_URL,SOURCE_ISO_URL,REMIX_ISO_NAME "$0" "$@"
+  exec sudo --preserve-env=AUTHORIZED_KEYS_URL,SOURCE_ISO_URL,REMIX_ISO_NAME,HOST_TIMEZONE "$0" "$@"
 fi
 
 usage() {
@@ -40,6 +40,7 @@ OUTPUT_ISO_ARG=""
 CHROOT_DIR="$ROOT_DIR/.remaster-chroot"
 AUTHORIZED_KEYS_URL=${AUTHORIZED_KEYS_URL:-}
 REFRESH_CHROOT=0
+HOST_TIMEZONE=${HOST_TIMEZONE:-$(cat /etc/timezone 2>/dev/null || timedatectl show -p Timezone --value 2>/dev/null || printf 'UTC')}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -189,6 +190,6 @@ if [[ -n ${SOURCE_ISO_URL:-} ]]; then
   INNER_CMD+=(--source-iso-url "$SOURCE_ISO_URL")
 fi
 
-chroot "$CHROOT_DIR" /usr/bin/env SOURCE_ISO_URL="${SOURCE_ISO_URL:-}" "${INNER_CMD[@]}"
+chroot "$CHROOT_DIR" /usr/bin/env SOURCE_ISO_URL="${SOURCE_ISO_URL:-}" HOST_TIMEZONE="$HOST_TIMEZONE" "${INNER_CMD[@]}"
 
 printf 'Remastered ISO written to %s\n' "$OUTPUT_ISO"
