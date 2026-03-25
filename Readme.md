@@ -10,9 +10,13 @@ It is destructive. The two matched disks are repartitioned and wiped.
 - Creates mirrored EFI and ZFS partitions on both disks.
 - Creates a mirrored `zroot` pool with common child datasets.
 - Bootstraps Debian Trixie into the ZFS root.
-- Installs kernel, headers, DKMS, ZFS userspace, `initramfs-tools`, and `zfs-initramfs` inside the target.
-- Builds a custom source-built `dracut` + `dracut-crypt-ssh` based ZFSBootMenu image inside the target.
-- Configures ZFSBootMenu remote SSH access when an authorized keys file is available in the live environment.
+- Installs kernel, headers, DKMS, ZFS userspace, and Debian Trixie's packaged `dracut`/`zfs-dracut` stack inside the target.
+- Installs `neovim`, `zsh`, and `oh-my-zsh` for the target root account with the `zfs` plugin enabled.
+- Stages root SSH authorized keys from the live environment when available and enables root SSH access.
+- Installs `/usr/local/sbin/zfs-useradd` to create new users with dedicated ZFS home datasets (`zroot/home/<user>`).
+- Builds the target initramfs with packaged `dracut` and verifies that the generated image contains ZFS support.
+- Installs the upstream prebuilt ZFSBootMenu UEFI image instead of building ZFSBootMenu from source.
+- Does not enable pre-boot networking or Dropbear SSH in ZFSBootMenu.
 - Creates UEFI boot entries for both ESPs and the fallback path `EFI/BOOT/BOOTX64.EFI`.
 
 ## Requirements
@@ -69,13 +73,13 @@ APT and DKMS-related package installation are configured to run non-interactivel
 
 ## Password Behavior
 
-At the end of the install, the script tries:
+The script sets the target root password noninteractively. By default it uses:
 
-```bash
-passwd root
+```text
+root
 ```
 
-If that fails, for example because the script is being run over SSH without a usable TTY, it falls back to setting the root password to:
+You can override that by exporting `ROOT_PASSWORD` before running the installer.
 
 ```text
 root
@@ -209,7 +213,7 @@ Use this after updating `zfs-root-menu.sh` in the live environment when you want
 - A guest NIC can look configured inside the VM while still being unusable if the host-side bridge or libvirt network backing it is dead. Verify both guest routes and host attachment.
 - ZFSBootMenu Dropbear access is `root@...`, not `user@...`.
 - Hostid mismatches between the pool and `/etc/hostid` can cause confusing import behavior. The installer now writes `spl_hostid=` into the ZFSBootMenu command line to keep pool import consistent.
-- The installed system needs a real ZFS-capable initramfs. The script now installs `zfs-initramfs`, regenerates initramfs, and verifies that the generated `initrd.img-*` contains ZFS content before proceeding.
+- The installed system needs a real ZFS-capable initramfs. The script installs packaged `dracut` and `zfs-dracut`, rebuilds `initrd.img-*`, and verifies that the generated image contains ZFS content before proceeding.
 - VM graphics were less reliable than serial during development. Treat `virsh console` as the authoritative early-boot view.
 
 ## Notes

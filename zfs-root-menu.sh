@@ -87,6 +87,53 @@ normalize_filter() {
   printf '%s\n' "$value"
 }
 
+resolve_disk_stable_path() {
+  local disk=$1
+  local real target link
+  real=$(realpath "$disk" 2>/dev/null || printf '%s' "$disk")
+
+  while IFS= read -r link; do
+    [[ -e $link ]] || continue
+    target=$(realpath "$link" 2>/dev/null || true)
+    [[ $target == "$real" ]] || continue
+    case ${link##*/} in
+      *-part*) continue ;;
+      ata-*)
+        printf '%s\n' "$link"
+        return 0
+        ;;
+    esac
+  done < <(find /dev/disk/by-id -maxdepth 1 -type l | sort)
+
+  while IFS= read -r link; do
+    [[ -e $link ]] || continue
+    target=$(realpath "$link" 2>/dev/null || true)
+    [[ $target == "$real" ]] || continue
+    case ${link##*/} in
+      *-part*) continue ;;
+      wwn-*|nvme-*|scsi-*)
+        printf '%s\n' "$link"
+        return 0
+        ;;
+    esac
+  done < <(find /dev/disk/by-id -maxdepth 1 -type l | sort)
+
+  printf '%s\n' "$disk"
+}
+
+partition_path() {
+  local disk=$1
+  local part=$2
+
+  if [[ $disk == /dev/disk/by-*/* ]]; then
+    printf '%s-part%s\n' "$disk" "$part"
+  elif [[ $disk =~ [0-9]$ ]]; then
+    printf '%sp%s\n' "$disk" "$part"
+  else
+    printf '%s%s\n' "$disk" "$part"
+  fi
+}
+
 find_matching_disks() {
   local name_filter=${DRIVE_NAME_FILTER,,}
   local size_filter
@@ -197,13 +244,13 @@ infer_existing_layout() {
     pkname=$(lsblk -no PKNAME "$member" 2>/dev/null || true)
     [[ -n "$pkname" ]] || die "Could not determine parent disk for $member"
     if [[ -z "$DISK1" ]]; then
-      DISK1="/dev/$pkname"
+      DISK1=$(resolve_disk_stable_path "/dev/$pkname")
       ZFS1="$member"
-      ESP1="${DISK1}1"
+      ESP1=$(partition_path "$DISK1" 1)
     else
-      DISK2="/dev/$pkname"
+      DISK2=$(resolve_disk_stable_path "/dev/$pkname")
       ZFS2="$member"
-      ESP2="${DISK2}1"
+      ESP2=$(partition_path "$DISK2" 1)
     fi
   done
 
@@ -217,13 +264,27 @@ infer_existing_layout() {
 if (( REPAIR_CHROOT == 0 )); then
   mapfile -t DISKS < <(find_matching_disks)
   [[ ${#DISKS[@]} -eq 2 ]] || die "Expected exactly 2 matching disks for --name '$DRIVE_NAME_FILTER' and --size '$DRIVE_SIZE_FILTER', found ${#DISKS[@]}"
-  DISK1="${DISKS[0]}"
-  DISK2="${DISKS[1]}"
-  ESP1="${DISK1}1"
-  ESP2="${DISK2}1"
-  ZFS1="${DISK1}2"
-  ZFS2="${DISK2}2"
+  DISK1=$(resolve_disk_stable_path "${DISKS[0]}")
+  DISK2=$(resolve_disk_stable_path "${DISKS[1]}")
+  ESP1=$(partition_path "$DISK1" 1)
+  ESP2=$(partition_path "$DISK2" 1)
+  ZFS1=$(partition_path "$DISK1" 2)
+  ZFS2=$(partition_path "$DISK2" 2)
 fi
+
+stage_target_root_authorized_keys() {
+  local candidate
+  for candidate in /root/.ssh/authorized_keys /home/user/.ssh/authorized_keys; do
+    if [[ -s "$candidate" ]]; then
+      install -d -m 700 "$MNT/root/.ssh"
+      install -m 600 "$candidate" "$MNT/root/.ssh/authorized_keys"
+      chown -R root:root "$MNT/root/.ssh"
+      log "Staged target root authorized_keys from $candidate"
+      return 0
+    fi
+  done
+  log "No root authorized_keys found in live environment; SSH key login will not be pre-seeded"
+}
 
 print_matched_disks() {
   local disk
@@ -282,11 +343,38 @@ prepare_existing_target() {
   [ -f "$MNT/etc/debian_version" ] || die "Existing target root not found at $MNT"
 }
 
+force_release_pool() {
+  local attempt
+  for attempt in 1 2 3; do
+    zfs unmount -a 2>/dev/null || true
+    umount -Rl "$MNT/dev" 2>/dev/null || true
+    umount -Rl "$MNT/proc" 2>/dev/null || true
+    umount -Rl "$MNT/sys" 2>/dev/null || true
+    umount -Rl "$MNT/run" 2>/dev/null || true
+    umount -Rl "$MNT/boot/efi2" 2>/dev/null || true
+    umount -Rl "$MNT/boot/efi" 2>/dev/null || true
+    umount -Rl "$MNT" 2>/dev/null || true
+    umount -l "$MNT" 2>/dev/null || true
+
+    if command -v fuser >/dev/null 2>&1; then
+      if [[ "${ZRM_KILL_MNT_HOLDERS:-0}" == "1" ]]; then
+        log "Force-killing $MNT holders (ZRM_KILL_MNT_HOLDERS=1)"
+        fuser -km "$MNT" 2>/dev/null || true
+      else
+        log "Skipping force-kill of $MNT holders (set ZRM_KILL_MNT_HOLDERS=1 to enable)"
+      fi
+    fi
+
+    zpool export -f "$POOL" 2>/dev/null && return 0
+    sleep 1
+  done
+
+  return 1
+}
+
 cleanup() {
   set +e
-  zfs unmount -a 2>/dev/null || true
-  umount -Rl "$MNT" 2>/dev/null || true
-  zpool export -f "$POOL" 2>/dev/null || true
+  force_release_pool || true
 }
 trap cleanup EXIT
 
@@ -366,7 +454,10 @@ EOF_APT
 
   log "Wiping disks"
 
-  zpool export -f "$POOL" 2>/dev/null || true
+  if zpool list "$POOL" >/dev/null 2>&1; then
+    log "Pool $POOL is active; attempting cleanup"
+    force_release_pool || die "Pool $POOL is busy; reboot the live environment and retry from a clean ISO session"
+  fi
   zpool labelclear -f "$ZFS1" 2>/dev/null || true
   zpool labelclear -f "$ZFS2" 2>/dev/null || true
 
@@ -402,7 +493,8 @@ EOF_APT
   zpool labelclear -f "$ZFS1" 2>/dev/null || true
   zpool labelclear -f "$ZFS2" 2>/dev/null || true
   if zpool status "$POOL" >/dev/null 2>&1; then
-    die "Pool $POOL is still active after disk wipe; export it cleanly or reboot the live environment before retrying"
+    log "Pool $POOL still appears active after wipe; retrying cleanup"
+    force_release_pool || die "Pool $POOL is still active after disk wipe; reboot the live environment before retrying"
   fi
 
   ############################################
@@ -454,7 +546,7 @@ EOF_APT
 
   mkdir -p "$MNT"
   zfs mount "$ROOT_DS"
-  zfs mount -a || true
+  zfs mount -a
 
   ############################################
 
@@ -481,26 +573,8 @@ EOF_APT
   mount --rbind /sys "$MNT/sys"
   mount --make-rslave "$MNT/sys"
 
-  ############################################
-
-  # REMOTE ZBM ACCESS PREP
-
-  ############################################
-
   collect_nic_drivers
   collect_boot_network
-
-  LIVE_AUTHORIZED_KEYS=""
-  for candidate in /root/.ssh/authorized_keys /home/user/.ssh/authorized_keys; do
-    if [[ -f "$candidate" ]]; then
-      LIVE_AUTHORIZED_KEYS="$candidate"
-      break
-    fi
-  done
-  if [[ -n "$LIVE_AUTHORIZED_KEYS" ]]; then
-    install -d -m 700 "$MNT/etc/dropbear"
-    install -m 600 "$LIVE_AUTHORIZED_KEYS" "$MNT/etc/dropbear/root_key"
-  fi
 
 fi
 
@@ -512,9 +586,10 @@ fi
 
 run_target_chroot_config() {
 local nic_drivers_env="${NIC_DRIVERS[*]:-}"
-chroot "$MNT" /usr/bin/env RELEASE="$RELEASE" INSTALL_HOSTNAME="$HOSTNAME" INSTALL_TIMEZONE="$INSTALL_TIMEZONE" ROOT_PASSWORD="$ROOT_PASSWORD" ESP1="$ESP1" ESP2="$ESP2" DISK1="$DISK1" DISK2="$DISK2" NIC_DRIVERS="$nic_drivers_env" BOOT_NET_IFACE="$BOOT_NET_IFACE" BOOT_NET_MAC="$BOOT_NET_MAC" POOL="$POOL" SKIP_ESP_FORMAT="${SKIP_ESP_FORMAT:-0}" /bin/bash <<'EOF_CHROOT'
+chroot "$MNT" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root TERM="${TERM:-dumb}" LANG=C.UTF-8 LC_ALL=C.UTF-8 LANGUAGE= RELEASE="$RELEASE" INSTALL_HOSTNAME="$HOSTNAME" INSTALL_TIMEZONE="$INSTALL_TIMEZONE" ROOT_PASSWORD="$ROOT_PASSWORD" ESP1="$ESP1" ESP2="$ESP2" DISK1="$DISK1" DISK2="$DISK2" NIC_DRIVERS="$nic_drivers_env" BOOT_NET_IFACE="$BOOT_NET_IFACE" BOOT_NET_MAC="$BOOT_NET_MAC" POOL="$POOL" SKIP_ESP_FORMAT="${SKIP_ESP_FORMAT:-0}" /bin/bash <<'EOF_CHROOT'
 set -e
 export DEBIAN_FRONTEND=noninteractive
+export LANG=C.UTF-8 LC_ALL=C.UTF-8 LANGUAGE=
 mkdir -p /var/log
 CHROOT_LOG=${ZRM_CHROOT_LOG:-/var/log/zfs-root-menu-chroot.log}
 exec > >(tee -a "$CHROOT_LOG") 2>&1
@@ -538,11 +613,6 @@ if [[ -n "${INSTALL_TIMEZONE:-}" && -e "/usr/share/zoneinfo/${INSTALL_TIMEZONE}"
   printf '%s\n' "${INSTALL_TIMEZONE}" > /etc/timezone
 fi
 
-printf '%s\n' 'en_US.UTF-8 UTF-8' > /etc/locale.gen
-locale-gen en_US.UTF-8
-update-locale LANG=en_US.UTF-8 LC_TIME=en_US.UTF-8 LC_NUMERIC=en_US.UTF-8
-export LANG=en_US.UTF-8 LC_TIME=en_US.UTF-8 LC_NUMERIC=en_US.UTF-8
-
 mkdir -p /tmp
 chmod 1777 /tmp
 mkdir -p /var/lib/dpkg /var/lib/apt/lists/partial /var/cache/apt/archives/partial
@@ -550,18 +620,39 @@ touch /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend
 
 apt-get update
 
-apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold initramfs-tools console-setup locales zstd apparmor linux-image-amd64 linux-headers-amd64 build-essential dkms zfs-dkms zfsutils-linux zfs-initramfs openssh-server openssh-client efibootmgr dosfstools rsync curl git fzf mbuffer kexec-tools libsort-versions-perl libboolean-perl libyaml-pp-perl systemd systemd-sysv systemd-boot-efi dbus dbus-broker iproute2 isc-dhcp-client iputils-arping bsdextrautils dropbear libblkid-dev pkgconf libkmod-dev libudev-dev libsystemd-dev asciidoc xmlto docbook-xml docbook-xsl
+apt-get install -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold console-setup locales zstd apparmor ca-certificates dracut dracut-config-generic linux-image-amd64 linux-headers-amd64 build-essential dkms zfs-dkms zfsutils-linux zfs-dracut openssh-server openssh-client efibootmgr dosfstools rsync curl neovim zsh git systemd systemd-sysv systemd-boot-efi dbus dbus-broker iproute2 isc-dhcp-client iputils-arping
 apt-get -f install -y
 dpkg --configure -a
+if command -v locale-gen >/dev/null 2>&1; then
+  printf '%s\n' 'en_US.UTF-8 UTF-8' > /etc/locale.gen
+  locale-gen en_US.UTF-8
+fi
+if command -v update-locale >/dev/null 2>&1; then
+  update-locale LANG=en_US.UTF-8 LC_TIME=en_US.UTF-8 LC_NUMERIC=en_US.UTF-8 || true
+fi
+export LANG=en_US.UTF-8 LC_TIME=en_US.UTF-8 LC_NUMERIC=en_US.UTF-8
 printf 'REMAKE_INITRD=yes\n' > /etc/dkms/zfs.conf
 TARGET_KERNEL=$(readlink -f /vmlinuz | sed 's|.*/vmlinuz-||')
 if command -v dkms >/dev/null 2>&1 && [[ ! -e "/lib/modules/${TARGET_KERNEL}/updates/dkms/zfs.ko" && ! -e "/lib/modules/${TARGET_KERNEL}/updates/dkms/zfs.ko.xz" ]]; then
   dkms autoinstall
 fi
-update-initramfs -u -k all
 INITRD_PATH="/boot/initrd.img-${TARGET_KERNEL}"
+if command -v dracut >/dev/null 2>&1; then
+  dracut --force "$INITRD_PATH" "$TARGET_KERNEL"
+else
+  echo "dracut is not installed in the target" >&2
+  exit 1
+fi
 [ -e "$INITRD_PATH" ] || { echo "missing $INITRD_PATH" >&2; exit 1; }
-lsinitramfs "$INITRD_PATH" | grep -Eq '(^|/)(zfs|zpool|mount\.zfs|vdev_id|hostid)($|/)' || { echo "$INITRD_PATH does not contain ZFS support" >&2; exit 1; }
+if command -v lsinitrd >/dev/null 2>&1; then
+  lsinitrd "$INITRD_PATH" | grep -Eq '(^|/)(zfs|zpool|mount\.zfs|vdev_id|hostid)($|/)' || { echo "$INITRD_PATH does not contain ZFS support" >&2; exit 1; }
+elif command -v lsinitramfs >/dev/null 2>&1; then
+  lsinitramfs "$INITRD_PATH" | grep -Eq '(^|/)(zfs|zpool|mount\.zfs|vdev_id|hostid)($|/)' || { echo "$INITRD_PATH does not contain ZFS support" >&2; exit 1; }
+else
+  echo "Neither lsinitrd nor lsinitramfs is available to validate $INITRD_PATH" >&2
+  exit 1
+fi
+export LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 LANGUAGE=
 TARGET_HOSTID=""
 if [[ -s /etc/hostid ]]; then
   TARGET_HOSTID=$(od -An -N4 -tx4 /etc/hostid | tr -d '[:space:]')
@@ -574,8 +665,8 @@ if [[ -z "$TARGET_HOSTID" ]]; then
     printf '%08x' "0x${TARGET_HOSTID}" | xxd -r -p > /etc/hostid
   fi
 fi
-zpool set cachefile=/etc/zfs/zpool.cache zroot
-zfs set org.zfsbootmenu:commandline="loglevel=7 spl_hostid=${TARGET_HOSTID} console=ttyS0,115200n8 console=tty0" zroot/ROOT
+zpool set cachefile=/etc/zfs/zpool.cache "$POOL"
+zfs set org.zfsbootmenu:commandline="loglevel=7 spl_hostid=${TARGET_HOSTID} zbm.timeout=10 console=ttyS0,115200n8 console=tty0" "$POOL/ROOT"
 
 echo "$INSTALL_HOSTNAME" > /etc/hostname
 
@@ -596,6 +687,11 @@ NET
 
 systemctl enable systemd-networkd
 systemctl enable serial-getty@ttyS0.service
+for unit in zfs-import-cache.service zfs-mount.service zfs.target; do
+  if systemctl list-unit-files "$unit" >/dev/null 2>&1; then
+    systemctl enable "$unit" || true
+  fi
+done
 
 ############################################
 
@@ -612,6 +708,17 @@ if [[ "${SKIP_ESP_FORMAT:-0}" != "1" ]]; then
 fi
 
 mountpoint -q /boot/efi || mount "$ESP1" /boot/efi
+ESP1_UUID=$(blkid -s UUID -o value "$ESP1" 2>/dev/null || true)
+ESP2_UUID=$(blkid -s UUID -o value "$ESP2" 2>/dev/null || true)
+cat > /etc/fstab <<FSTAB
+# / is managed by ZFS
+FSTAB
+if [[ -n "$ESP1_UUID" ]]; then
+  printf 'UUID=%s /boot/efi vfat umask=0077 0 1\n' "$ESP1_UUID" >> /etc/fstab
+fi
+if [[ -n "$ESP2_UUID" ]]; then
+  printf 'UUID=%s /boot/efi2 vfat noauto,umask=0077 0 0\n' "$ESP2_UUID" >> /etc/fstab
+fi
 
 ############################################
 
@@ -619,65 +726,14 @@ mountpoint -q /boot/efi || mount "$ESP1" /boot/efi
 
 ############################################
 
-rm -rf /usr/src/dracut /usr/src/dracut-crypt-ssh /usr/src/zfsbootmenu
-rm -f /usr/lib/systemd/system/dracut-shutdown-onfailure.service       /usr/lib/systemd/system/dracut-shutdown.service       /usr/lib/systemd/system/sysinit.target.wants/dracut-shutdown.service       /usr/lib/systemd/system/initrd.target.wants/dracut-cmdline.service       /usr/lib/systemd/system/initrd.target.wants/dracut-initqueue.service       /usr/lib/systemd/system/initrd.target.wants/dracut-mount.service       /usr/lib/systemd/system/initrd.target.wants/dracut-pre-mount.service       /usr/lib/systemd/system/initrd.target.wants/dracut-pre-pivot.service       /usr/lib/systemd/system/initrd.target.wants/dracut-pre-trigger.service       /usr/lib/systemd/system/initrd.target.wants/dracut-pre-udev.service
-mkdir -p /boot/efi/EFI/ZBM /boot/efi/EFI/BOOT /etc/zfsbootmenu /etc/zfsbootmenu/dracut.conf.d /etc/cmdline.d /etc/dropbear /usr/src/zfsbootmenu /usr/src/dracut-crypt-ssh /root/.ssh
-
-for keytype in rsa ecdsa; do
-  if [[ ! -f "/etc/dropbear/ssh_host_${keytype}_key" ]]; then
-    ssh-keygen -q -g -N "" -m PEM -t "$keytype" -f "/etc/dropbear/ssh_host_${keytype}_key"
-  fi
-done
-if [[ -f /etc/dropbear/root_key ]]; then
-  install -m 600 /etc/dropbear/root_key /root/.ssh/authorized_keys
-fi
-
-git clone --depth=1 https://github.com/dracutdevs/dracut.git /usr/src/dracut
-( cd /usr/src/dracut && ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --systemdsystemunitdir=/usr/lib/systemd/system --systemdutildir=/usr/lib/systemd && make && make install )
-git clone --depth=1 https://github.com/dracut-crypt-ssh/dracut-crypt-ssh.git /usr/src/dracut-crypt-ssh
-( cd /usr/src/dracut-crypt-ssh && ./configure --prefix=/usr && make && make install )
-
-curl -L https://get.zfsbootmenu.org/source | tar -zxv --strip-components=1 -C /usr/src/zfsbootmenu -f -
-make -C /usr/src/zfsbootmenu core dracut
-
-cat > /etc/zfsbootmenu/config.yaml <<CFG
-Global:
-  ManageImages: true
-  BootMountPoint: /boot/efi
-Components:
-  Enabled: false
-EFI:
-  Enabled: true
-  ImageDir: /boot/efi/EFI/ZBM
-  Versions: false
-Kernel:
-  CommandLine: loglevel=7 rd.debug rd.shell zbm.show spl_hostid=${TARGET_HOSTID} console=ttyS0,115200n8 console=tty0
-CFG
-
-COMMON_NET_DRIVERS="virtio virtio_pci virtio_ring virtio_net e1000 e1000e igc igb r8169 tg3 bnxt_en mlx5_core"
-ALL_DRIVERS="ahci ata_piix sd_mod virtio_blk virtio_pci ${COMMON_NET_DRIVERS} ${NIC_DRIVERS:-}"
-ALL_DRIVERS=$(printf '%s\n' "$ALL_DRIVERS" | xargs -n1 | awk 'NF && !seen[$0]++' | xargs)
-RD_DRIVER_PRE=$(printf '%s\n' "$ALL_DRIVERS" | xargs -n1 printf ' rd.driver.pre=%s')
-if [[ -n "${BOOT_NET_MAC:-}" ]]; then
-  echo "ifname=bootnet:${BOOT_NET_MAC} ip=bootnet:dhcp rd.neednet=1 rd.net.dhcp.retry=1 rd.net.timeout.iflink=30 rd.net.timeout.ifup=30 rd.net.timeout.dhcp=30${RD_DRIVER_PRE}" > /etc/cmdline.d/dracut-network.conf
-else
-  echo "ip=dhcp rd.neednet=1 rd.net.dhcp.retry=1 rd.net.timeout.iflink=30 rd.net.timeout.ifup=30 rd.net.timeout.dhcp=30${RD_DRIVER_PRE}" > /etc/cmdline.d/dracut-network.conf
-fi
-cat > /etc/zfsbootmenu/dracut.conf.d/dropbear.conf <<DROPBEAR
-add_dracutmodules+=" crypt-ssh "
-omit_dracutmodules+=" systemd systemd-initrd dracut-systemd systemd-battery-check systemd-udevd fido2 systemd-cryptsetup systemd-pcrphase systemd-networkd dbus dbus-broker dbus-daemon iscsi nbd nfs "
-install_optional_items+=" /etc/cmdline.d/dracut-network.conf "
-dropbear_rsa_key=/etc/dropbear/ssh_host_rsa_key
-dropbear_ecdsa_key=/etc/dropbear/ssh_host_ecdsa_key
-dropbear_acl=/etc/dropbear/root_key
-hostonly="no"
-add_drivers+=" ${ALL_DRIVERS} "
-force_drivers+=" ${ALL_DRIVERS} "
-DROPBEAR
-
-generate-zbm
+mkdir -p /boot/efi/EFI/ZBM /boot/efi/EFI/BOOT
+curl --retry 5 --retry-delay 2 --retry-connrefused -fL -o /boot/efi/EFI/ZBM/VMLINUZ.EFI https://get.zfsbootmenu.org/efi
+[ -s /boot/efi/EFI/ZBM/VMLINUZ.EFI ] || { echo "Downloaded ZBM EFI payload is missing or empty" >&2; exit 1; }
 cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI
 cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/BOOT/BOOTX64.EFI
+for path in /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/ZBM/VMLINUZ-BACKUP.EFI /boot/efi/EFI/BOOT/BOOTX64.EFI; do
+  [ -s "$path" ] || { echo "Missing EFI payload on primary ESP: $path" >&2; exit 1; }
+done
 
 ############################################
 
@@ -687,9 +743,13 @@ cp /boot/efi/EFI/ZBM/VMLINUZ.EFI /boot/efi/EFI/BOOT/BOOTX64.EFI
 
 cat > /usr/local/sbin/sync-efi.sh <<SYNC
 #!/usr/bin/env bash
-mount "$ESP2" /boot/efi2 2>/dev/null || true
+set -euo pipefail
+mountpoint -q /boot/efi2 || mount "$ESP2" /boot/efi2
 rsync -a --delete /boot/efi/ /boot/efi2/
-umount /boot/efi2 || true
+sync
+if mountpoint -q /boot/efi2; then
+  umount /boot/efi2 2>/dev/null || umount -l /boot/efi2 2>/dev/null || true
+fi
 SYNC
 
 chmod +x /usr/local/sbin/sync-efi.sh
@@ -707,8 +767,13 @@ PathChanged=/boot/efi/EFI/ZBM
 WantedBy=multi-user.target
 PATH
 
-systemctl enable efi-sync.path
 /usr/local/sbin/sync-efi.sh
+mountpoint -q /boot/efi2 || mount "$ESP2" /boot/efi2
+for path in /boot/efi2/EFI/ZBM/VMLINUZ.EFI /boot/efi2/EFI/ZBM/VMLINUZ-BACKUP.EFI /boot/efi2/EFI/BOOT/BOOTX64.EFI; do
+  [ -s "$path" ] || { echo "Missing EFI payload on mirror ESP: $path" >&2; exit 1; }
+done
+umount /boot/efi2 2>/dev/null || umount -l /boot/efi2 2>/dev/null || true
+systemctl enable efi-sync.path
 
 ############################################
 
@@ -721,11 +786,73 @@ efibootmgr -c -d "$DISK2" -p 1 -L "ZFSBootMenu Mirror" -l '\EFI\ZBM\VMLINUZ-BACK
 
 ############################################
 
-# ROOT PASSWORD
+# ROOT PASSWORD + SSH ACCESS
 
 ############################################
 
-printf 'root:%s\n' "${ROOT_PASSWORD:-root}" | chpasswd
+ROOT_PASSWORD=${ROOT_PASSWORD:-root}
+printf 'root:%s\n' "${ROOT_PASSWORD}" | chpasswd
+passwd -u root >/dev/null 2>&1 || true
+
+install -d -m 700 /root/.ssh
+if [[ -s /root/.ssh/authorized_keys ]]; then
+  chmod 600 /root/.ssh/authorized_keys
+fi
+cat > /etc/ssh/sshd_config.d/99-zfs-root-menu.conf <<SSHD
+PermitRootLogin prohibit-password
+PasswordAuthentication no
+PubkeyAuthentication yes
+SSHD
+systemctl enable ssh.service || true
+
+if [[ ! -d /root/.oh-my-zsh ]]; then
+  git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git /root/.oh-my-zsh
+fi
+cat > /root/.zshrc <<'ZSHRC'
+export ZSH="$HOME/.oh-my-zsh"
+ZSH_THEME="robbyrussell"
+plugins=(git zfs)
+source $ZSH/oh-my-zsh.sh
+ZSHRC
+chown root:root /root/.zshrc
+chmod 600 /root/.zshrc
+chsh -s /usr/bin/zsh root || true
+
+cat > /usr/local/sbin/zfs-useradd <<ZFSUSERADD
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -lt 1 ]]; then
+  echo "Usage: zfs-useradd <username>" >&2
+  exit 1
+fi
+USER_NAME="$1"
+POOL_NAME="$POOL"
+HOME_DS="${POOL_NAME}/home/${USER_NAME}"
+HOME_DIR="/home/${USER_NAME}"
+if ! zfs list "$HOME_DS" >/dev/null 2>&1; then
+  zfs create -o mountpoint="$HOME_DIR" "$HOME_DS"
+fi
+if ! id "$USER_NAME" >/dev/null 2>&1; then
+  useradd -m -d "$HOME_DIR" -s /usr/bin/zsh "$USER_NAME"
+fi
+chown -R "$USER_NAME:$USER_NAME" "$HOME_DIR"
+passwd "$USER_NAME"
+ZFSUSERADD
+chmod 755 /usr/local/sbin/zfs-useradd
+
+for dir in /var/lib/dpkg /var/lib/apt/lists/partial /var/cache/apt/archives/partial /var/log /var/tmp /tmp /run/lock; do
+  install -d "$dir"
+done
+chmod 1777 /tmp /var/tmp
+[ -e /var/lib/dpkg/status ] || { echo "Missing /var/lib/dpkg/status; target root is not package-manageable" >&2; exit 1; }
+for ds in "$POOL/boot" "$POOL/var" "$POOL/var/lib" "$POOL/var/log" "$POOL/var/cache"; do
+  if zfs list "$ds" >/dev/null 2>&1; then
+    if [[ "$(zfs get -H -o value mounted "$ds")" != "yes" ]]; then
+      zfs mount "$ds" 2>/dev/null || true
+    fi
+    [ "$(zfs get -H -o value mounted "$ds")" = "yes" ] || { echo "Dataset $ds is not mounted" >&2; exit 1; }
+  fi
+done
 EOF_CHROOT
 }
 
@@ -737,6 +864,7 @@ if (( REPAIR_CHROOT == 1 )); then
 else
   SKIP_ESP_FORMAT=0
 fi
+stage_target_root_authorized_keys
 run_target_chroot_config
 
 ############################################

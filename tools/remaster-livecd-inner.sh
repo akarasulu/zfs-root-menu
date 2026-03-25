@@ -201,12 +201,6 @@ chown user:user /home/user/.config/kscreenlockerrc
 chmod 600 /home/user/.config/kscreenlockerrc
 
 cat > /home/user/.config/powermanagementprofilesrc <<'POWERDEVIL'
-[AC][DimDisplay]
-idleTime=0
-
-[AC][DPMSControl]
-idleTime=0
-
 [AC][HandleButtonEvents]
 lidAction=32
 
@@ -214,24 +208,12 @@ lidAction=32
 autoSuspendAction=0
 autoSuspendIdleTimeoutSec=0
 
-[Battery][DimDisplay]
-idleTime=0
-
-[Battery][DPMSControl]
-idleTime=0
-
 [Battery][HandleButtonEvents]
 lidAction=32
 
 [Battery][SuspendAndShutdown]
 autoSuspendAction=0
 autoSuspendIdleTimeoutSec=0
-
-[LowBattery][DimDisplay]
-idleTime=0
-
-[LowBattery][DPMSControl]
-idleTime=0
 
 [LowBattery][HandleButtonEvents]
 lidAction=32

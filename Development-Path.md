@@ -20,7 +20,7 @@ The final boot path is split into two layers:
 1. ZFSBootMenu layer
 - built inside the target chroot
 - uses source-built `dracut`
-- uses source-built `dracut-crypt-ssh`
+- uses Debian packaged `dracut`/`dracut-network`/`zfs-dracut` and no pre-boot Dropbear SSH
 - includes explicit driver loading for storage and network so early networking is predictable
 - uses a consistent `spl_hostid=` kernel argument so pool import behavior is stable
 
@@ -54,9 +54,9 @@ The successful target-side path was:
 2. Partition both disks with mirrored ESPs and mirrored ZFS members.
 3. Create `zroot` and the child datasets.
 4. Debootstrap Debian Trixie into the target.
-5. Install kernel, headers, DKMS, ZFS userspace, `initramfs-tools`, and `zfs-initramfs` in the target.
+5. Install kernel, headers, DKMS, ZFS userspace, `initramfs-tools`, `zfs-initramfs`, and packaged `dracut`/`zfs-dracut` in the target.
 6. Build source `dracut` in the target.
-7. Build source `dracut-crypt-ssh` in the target.
+7. Use Debian's packaged dracut stack in the target; no custom dracut or Dropbear build step.
 8. Build ZFSBootMenu in the target.
 9. Generate a verified Debian initramfs for the installed kernel.
 10. Write UEFI entries for both ESPs plus the `BOOTX64.EFI` fallback path.
