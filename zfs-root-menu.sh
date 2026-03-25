@@ -286,6 +286,18 @@ stage_target_root_authorized_keys() {
   log "No root authorized_keys found in live environment; SSH key login will not be pre-seeded"
 }
 
+ensure_target_datasets_mounted() {
+  local ds
+  for ds in "$ROOT_DS"; do
+    if zfs list "$ds" >/dev/null 2>&1; then
+      if [[ "$(zfs get -H -o value mounted "$ds")" != "yes" ]]; then
+        zfs mount "$ds" 2>/dev/null || true
+      fi
+      [[ "$(zfs get -H -o value mounted "$ds")" == "yes" ]] || die "Dataset $ds is not mounted before chroot"
+    fi
+  done
+}
+
 print_matched_disks() {
   local disk
   printf 'Matched install disks:\n'
@@ -323,6 +335,7 @@ prepare_existing_target() {
   mkdir -p "$MNT"
   zfs mount "$ROOT_DS" 2>/dev/null || true
   zfs mount -a 2>/dev/null || true
+  ensure_target_datasets_mounted
 
   mkdir -p "$MNT/boot/efi" "$MNT/boot/efi2"
   mountpoint -q "$MNT/boot/efi" || mount "$ESP1" "$MNT/boot/efi"
@@ -346,7 +359,7 @@ prepare_existing_target() {
 force_release_pool() {
   local attempt
   for attempt in 1 2 3; do
-    zfs unmount -a 2>/dev/null || true
+    zfs unmount -r "$POOL" 2>/dev/null || true
     umount -Rl "$MNT/dev" 2>/dev/null || true
     umount -Rl "$MNT/proc" 2>/dev/null || true
     umount -Rl "$MNT/sys" 2>/dev/null || true
@@ -527,11 +540,9 @@ EOF_APT
   zfs create -o mountpoint=/ -o canmount=noauto "$ROOT_DS"
 
   for ds in \
-    home root srv tmp \
-    var var/log var/tmp var/cache var/lib var/spool var/www \
+    home srv tmp \
     opt opt/local \
-    usr-local usr-src \
-    boot
+    usr-local usr-src
   do
     zfs create -o mountpoint="/$ds" "$POOL/$ds"
   done
@@ -547,6 +558,7 @@ EOF_APT
   mkdir -p "$MNT"
   zfs mount "$ROOT_DS"
   zfs mount -a
+  ensure_target_datasets_mounted
 
   ############################################
 
@@ -781,6 +793,10 @@ systemctl enable efi-sync.path
 
 ############################################
 
+while read -r id; do
+  [[ -n "$id" ]] || continue
+  efibootmgr -b "$id" -B >/dev/null 2>&1 || true
+done < <(efibootmgr | awk '/ZFSBootMenu/{sub(/^Boot/,"",$1); sub(/\*/,"",$1); print $1}')
 efibootmgr -c -d "$DISK1" -p 1 -L "ZFSBootMenu" -l '\EFI\ZBM\VMLINUZ.EFI'
 efibootmgr -c -d "$DISK2" -p 1 -L "ZFSBootMenu Mirror" -l '\EFI\ZBM\VMLINUZ-BACKUP.EFI'
 
@@ -808,10 +824,14 @@ systemctl enable ssh.service || true
 if [[ ! -d /root/.oh-my-zsh ]]; then
   git clone --depth=1 https://github.com/ohmyzsh/ohmyzsh.git /root/.oh-my-zsh
 fi
-cat > /root/.zshrc <<'ZSHRC'
+ROOT_ZSH_PLUGINS="git"
+if [[ -f /root/.oh-my-zsh/plugins/zfs/zfs.plugin.zsh ]]; then
+  ROOT_ZSH_PLUGINS="git zfs"
+fi
+cat > /root/.zshrc <<ZSHRC
 export ZSH="$HOME/.oh-my-zsh"
 ZSH_THEME="robbyrussell"
-plugins=(git zfs)
+plugins=($ROOT_ZSH_PLUGINS)
 source $ZSH/oh-my-zsh.sh
 ZSHRC
 chown root:root /root/.zshrc
@@ -845,14 +865,7 @@ for dir in /var/lib/dpkg /var/lib/apt/lists/partial /var/cache/apt/archives/part
 done
 chmod 1777 /tmp /var/tmp
 [ -e /var/lib/dpkg/status ] || { echo "Missing /var/lib/dpkg/status; target root is not package-manageable" >&2; exit 1; }
-for ds in "$POOL/boot" "$POOL/var" "$POOL/var/lib" "$POOL/var/log" "$POOL/var/cache"; do
-  if zfs list "$ds" >/dev/null 2>&1; then
-    if [[ "$(zfs get -H -o value mounted "$ds")" != "yes" ]]; then
-      zfs mount "$ds" 2>/dev/null || true
-    fi
-    [ "$(zfs get -H -o value mounted "$ds")" = "yes" ] || { echo "Dataset $ds is not mounted" >&2; exit 1; }
-  fi
-done
+# no per-dataset mount checks needed in simplified layout
 EOF_CHROOT
 }
 
@@ -864,8 +877,11 @@ if (( REPAIR_CHROOT == 1 )); then
 else
   SKIP_ESP_FORMAT=0
 fi
+ensure_target_datasets_mounted
 stage_target_root_authorized_keys
+log "Running target chroot configuration"
 run_target_chroot_config
+log "Target chroot configuration complete"
 
 ############################################
 
@@ -873,6 +889,20 @@ run_target_chroot_config
 
 ############################################
 
-zpool export "$POOL"
+if zpool list "$POOL" >/dev/null 2>&1; then
+  if zpool export "$POOL"; then
+    log "Exported pool $POOL"
+  else
+    log "Initial export of $POOL failed; retrying cleanup"
+    force_release_pool || true
+    if zpool list "$POOL" >/dev/null 2>&1; then
+      log "WARNING: Pool $POOL is still active; continuing without export"
+    else
+      log "Exported pool $POOL after cleanup retry"
+    fi
+  fi
+else
+  log "Pool $POOL already exported"
+fi
 
 log "DONE - REBOOT NOW"

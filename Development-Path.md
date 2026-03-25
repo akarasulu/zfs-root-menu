@@ -10,27 +10,23 @@ The working result was:
 - a live environment with SSH and baked-in ZFS support
 - a destructive installer that creates a mirrored ZFS root on two disks
 - a target system that boots through ZFSBootMenu
-- ZFSBootMenu pre-boot SSH access via Dropbear
-- an installed Debian system that boots its ZFS root using a verified ZFS-capable initramfs
+- no pre-boot SSH in ZFSBootMenu (Dropbear is not configured)
+- an installed Debian system that boots its ZFS root using a verified ZFS-capable dracut initramfs
 
 ## Working Boot Stack
 
-The final boot path is split into two layers:
+The current working boot path is:
 
 1. ZFSBootMenu layer
-- built inside the target chroot
-- uses source-built `dracut`
-- uses Debian packaged `dracut`/`dracut-network`/`zfs-dracut` and no pre-boot Dropbear SSH
-- includes explicit driver loading for storage and network so early networking is predictable
-- uses a consistent `spl_hostid=` kernel argument so pool import behavior is stable
+- uses the upstream prebuilt EFI payload from `https://get.zfsbootmenu.org/efi`
+- no custom ZFSBootMenu build from source
+- no pre-boot Dropbear SSH configuration
+- uses `org.zfsbootmenu:commandline` with `spl_hostid=` and serial/console args
 
 2. Installed system layer
-- uses Debian's normal `initramfs-tools`
-- installs `zfs-initramfs`
-- regenerates `initrd.img-*`
-- verifies the resulting initramfs actually contains ZFS-related content before the installer continues
-
-That distinction matters. ZFSBootMenu can work perfectly and still hand off to a broken installed-system initramfs if the target initramfs is not truly ZFS-capable.
+- uses Debian packaged `dracut` + `zfs-dracut`
+- regenerates `/boot/initrd.img-*`
+- verifies generated initramfs contains ZFS-related content before continuing
 
 ## Live ISO Path That Worked
 
@@ -48,18 +44,17 @@ The live environment should be treated as a proper installer and rescue environm
 
 ## Target Installer Path That Worked
 
-The successful target-side path was:
+The successful target-side path is:
 
 1. Match exactly two disks by name and size.
 2. Partition both disks with mirrored ESPs and mirrored ZFS members.
-3. Create `zroot` and the child datasets.
-4. Debootstrap Debian Trixie into the target.
-5. Install kernel, headers, DKMS, ZFS userspace, `initramfs-tools`, `zfs-initramfs`, and packaged `dracut`/`zfs-dracut` in the target.
-6. Build source `dracut` in the target.
-7. Use Debian's packaged dracut stack in the target; no custom dracut or Dropbear build step.
-8. Build ZFSBootMenu in the target.
-9. Generate a verified Debian initramfs for the installed kernel.
-10. Write UEFI entries for both ESPs plus the `BOOTX64.EFI` fallback path.
+3. Create `zroot`, `zroot/ROOT`, and target datasets.
+4. Bootstrap Debian Trixie into the target.
+5. Install kernel, headers, DKMS, ZFS userspace, `dracut`, and `zfs-dracut` in the target.
+6. Build and verify target `initrd.img-*` for ZFS readiness.
+7. Install upstream prebuilt ZFSBootMenu EFI payload to both ESPs and fallback path.
+8. Create mirrored UEFI entries and deduplicate old ZFSBootMenu entries.
+9. Validate the install with `verify-install.sh` before rebooting.
 
 ## VM Network Model That Worked
 
@@ -74,19 +69,6 @@ Why this mattered:
 - a dead or unmanaged `virbr0` looked valid at first but was not actually carrying traffic
 - hidden or partially attached VM NICs created false conclusions about DHCP and routing
 - macvlan/macvtap provided working outbound internet, but host access had to stay on a separate NIC because macvlan/macvtap does not give normal host-to-guest connectivity on the same parent path
-
-## ZFSBootMenu Network Bring-Up
-
-The successful ZFSBootMenu path required all of the following:
-
-- detect the active NIC drivers from the live environment
-- carry those drivers into the target configuration
-- include them with `add_drivers+=...`
-- request early load with `force_drivers+=...`
-- add `rd.driver.pre=...` entries so dracut requests them very early
-- steer dracut toward the intended boot network rather than leaving it to pick the wrong NIC in a multi-interface VM
-
-Without explicit early driver handling, the VM could see the PCI NIC device while still failing to create any usable `ethX`/`enpXsY` device during the ZFSBootMenu boot.
 
 ## Hostid Handling
 
@@ -117,10 +99,9 @@ Without the `rslave` step, recursive unmount during cleanup could propagate back
 These are the issues most likely to plague future users:
 
 - Do not trust only the guest routing table when debugging VM networking. Verify the host-side bridge, tap attachment, and libvirt network state too.
-- Do not mix a distro-managed dracut stack and a source-installed dracut stack casually. The final working path used source dracut only for ZFSBootMenu and Debian's normal initramfs path for the installed system.
+- Keep the target on Debian's packaged `dracut`/`zfs-dracut` path and verify generated initramfs content before reboot.
 - Do not allow boot-critical package or initramfs steps to fail quietly. It is better for the installer to stop than to produce a boot environment that only fails later.
 - Do not assume graphical output is authoritative during early boot. Serial was consistently the most trustworthy view.
-- Do not assume Dropbear login user names match the live ISO login. ZFSBootMenu Dropbear login is `root`.
 - Do not rely on a VM internet path that is not fully attached at the host bridge level.
 
 ## Operational Summary
@@ -131,8 +112,9 @@ The correct day-to-day flow is:
 2. Start a VM whose network model is known-good for both host access and outbound internet.
 3. Boot the ISO and SSH into the live environment if desired.
 4. Run the destructive installer.
-5. Reboot into ZFSBootMenu.
-6. Verify pre-boot SSH and serial console behavior.
-7. Boot the installed Debian environment and confirm it mounts ZFS root without dropping to BusyBox initramfs.
+5. Run `verify-install.sh` and require `RESULT: PASS`.
+6. Reboot into ZFSBootMenu.
+7. Verify serial console behavior (and menu countdown/selection flow).
+8. Boot the installed Debian environment and confirm it mounts ZFS root without dropping to BusyBox initramfs.
 
 If the disks already contain a valid target install and only the target boot stack needs regeneration, use `--repair-chroot` from the live ISO instead of reinstalling from scratch.

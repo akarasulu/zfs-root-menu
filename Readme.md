@@ -18,6 +18,7 @@ It is destructive. The two matched disks are repartitioned and wiped.
 - Installs the upstream prebuilt ZFSBootMenu UEFI image instead of building ZFSBootMenu from source.
 - Does not enable pre-boot networking or Dropbear SSH in ZFSBootMenu.
 - Creates UEFI boot entries for both ESPs and the fallback path `EFI/BOOT/BOOTX64.EFI`.
+- Deduplicates old `ZFSBootMenu` NVRAM entries before creating new ones.
 
 ## Requirements
 
@@ -58,6 +59,25 @@ Options:
 - `--dry-run`: Print matched drives and planned partition devices, then exit without making changes.
 - `--help`: Show usage.
 
+## Verification (Checkpoint)
+
+After installer completion, run one command:
+
+```bash
+sudo ./verify-install.sh
+```
+
+Expected result:
+
+- `RESULT: PASS`
+- `OK: Installer completion marker present`
+- `OK: dpkg status present`
+- `OK: initrd present under /mnt/boot`
+- `OK: root authorized_keys present`
+- `OK: ESP1/ESP2 ... payload present`
+
+`verify-install.sh` defaults to the newest installer log in `/tmp` and automatically prints a full debug block when validation fails.
+
 ## Disk Matching
 
 The script matches disks from `lsblk` using:
@@ -97,20 +117,11 @@ That fallback `BOOTX64.EFI` path matters for firmware that ignores or loses expl
 
 ## ZFSBootMenu SSH Access
 
-The installer builds a custom ZFSBootMenu image inside the target chroot.
-
-When an authorized keys file is available in the live environment, the installer copies it into the target and configures Dropbear-based remote access in the generated ZFSBootMenu image.
-
-Authorized keys source order during install:
+The installer does not configure Dropbear or pre-boot SSH for ZFSBootMenu.
+Root SSH key staging applies to the installed system (`/root/.ssh/authorized_keys`), sourced from live environment files when available:
 
 - `/root/.ssh/authorized_keys`
 - `/home/user/.ssh/authorized_keys`
-
-Expected behavior:
-
-- ZFSBootMenu Dropbear listens on guest port `222`.
-- Login is as `root`, not `user`.
-- The authorized key must be present in the generated image, or SSH will fail with `Permission denied (publickey)`.
 
 ## Remaster Workflow
 
@@ -209,12 +220,11 @@ Use this after updating `zfs-root-menu.sh` in the live environment when you want
 ## Known Pitfalls
 
 - PTYs can break if `/dev`, `/proc`, and `/sys` are bind-mounted into the target chroot without `rslave` propagation controls. This was fixed in the script, but it is the first thing to suspect if `sudo` starts failing after the installer runs.
-- ZFSBootMenu networking is sensitive to the actual VM NIC topology. The working path depended on loading the correct NIC drivers early and steering dracut toward the intended boot network.
 - A guest NIC can look configured inside the VM while still being unusable if the host-side bridge or libvirt network backing it is dead. Verify both guest routes and host attachment.
-- ZFSBootMenu Dropbear access is `root@...`, not `user@...`.
 - Hostid mismatches between the pool and `/etc/hostid` can cause confusing import behavior. The installer now writes `spl_hostid=` into the ZFSBootMenu command line to keep pool import consistent.
 - The installed system needs a real ZFS-capable initramfs. The script installs packaged `dracut` and `zfs-dracut`, rebuilds `initrd.img-*`, and verifies that the generated image contains ZFS content before proceeding.
 - VM graphics were less reliable than serial during development. Treat `virsh console` as the authoritative early-boot view.
+- Final `zpool export` can fail in a busy live session; installer completion is decided by install/verification state, not export success alone.
 
 ## Notes
 
