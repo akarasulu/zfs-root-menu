@@ -1,0 +1,38 @@
+---
+zbm_manage_validate_mounts: true
+zbm_manage_required_mountpoints:
+  - /boot/efi
+
+zbm_manage_rebuild_initramfs: true
+zbm_manage_verify_initramfs_contains_zfs: true
+zbm_manage_vfio_enable: true
+zbm_manage_vfio_ids:
+  - "1002:7551"
+  - "1002:ab40"
+
+zbm_manage_set_kernel_commandline: true
+zbm_manage_zpool_name: zroot
+zbm_manage_root_dataset: zroot/ROOT
+zbm_manage_apply_commandline_to_bootfs: true
+zbm_manage_kernel_commandline_extra_tokens:
+  - intel_iommu=on
+  - iommu=pt
+  - vfio-pci.ids=1002:7551,1002:ab40
+
+zbm_manage_config:
+  Global:
+    ManageImages: true
+    BootMountPoint: /boot
+  EFI:
+    ImageDir: /boot/efi/EFI/ZBM
+  Kernel:
+    CommandLine: "quiet"
+
+zbm_manage_enable_efi_mirror_sync: true
+zbm_manage_primary_efi_mountpoint: /boot/efi
+zbm_manage_mirror_efi_mountpoint: /boot/efi2
+zbm_manage_mirror_efi_device: ""
+zbm_manage_run_mirror_sync_now: false
+
+zbm_manage_run_generate: false
+zbm_manage_run_generate_on_change: false

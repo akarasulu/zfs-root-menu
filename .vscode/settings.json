@@ -4,11 +4,14 @@
         "DKMS",
         "dracut",
         "HARDDISK",
+        "hostid",
         "mountpoint",
         "NVRAM",
+        "rslave",
         "Trixie",
         "UEFI",
         "userspace",
+        "virsh",
         "zfsbootmenu",
         "zroot"
     ]

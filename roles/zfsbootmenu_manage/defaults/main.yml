@@ -1,0 +1,83 @@
+---
+zbm_manage_packages:
+  - git
+  - make
+  - dracut
+  - zfs-dracut
+
+zbm_manage_repo_url: "https://github.com/zbm-dev/zfsbootmenu.git"
+zbm_manage_repo_version: "master"
+zbm_manage_repo_dest: "/opt/zfsbootmenu-src"
+zbm_manage_repo_force: true
+zbm_manage_force_rebuild: false
+
+zbm_manage_build_command: "make"
+zbm_manage_generate_zbm_src_path: "{{ zbm_manage_repo_dest }}/bin/generate-zbm"
+zbm_manage_generate_zbm_path: "/usr/local/sbin/generate-zbm"
+
+zbm_manage_vfio_enable: false
+zbm_manage_vfio_ids: []
+zbm_manage_vfio_softdep_modules:
+  - amdgpu
+  - snd_hda_intel
+zbm_manage_vfio_modprobe_config_path: "/etc/modprobe.d/vfio.conf"
+zbm_manage_vfio_dracut_config_path: "/etc/dracut.conf.d/10-vfio.conf"
+zbm_manage_vfio_drivers:
+  - vfio
+  - vfio_pci
+  - vfio_pci_core
+  - vfio_iommu_type1
+
+zbm_manage_rebuild_initramfs: false
+zbm_manage_initramfs_kernel: ""
+zbm_manage_initramfs_path: ""
+zbm_manage_verify_initramfs_contains_zfs: true
+
+zbm_manage_config_dir: "/etc/zfsbootmenu"
+zbm_manage_config_path: "{{ zbm_manage_config_dir }}/config.yaml"
+zbm_manage_config_content: ""
+zbm_manage_config:
+  Global:
+    ManageImages: true
+    BootMountPoint: "/boot"
+  EFI:
+    ImageDir: "/boot/efi/EFI/ZBM"
+  Kernel:
+    CommandLine: "quiet"
+
+zbm_manage_validate_mounts: true
+zbm_manage_required_mountpoints:
+  - /boot/efi
+
+zbm_manage_set_kernel_commandline: true
+zbm_manage_zpool_name: "zroot"
+zbm_manage_root_dataset: "{{ zbm_manage_zpool_name }}/ROOT"
+zbm_manage_apply_commandline_to_bootfs: true
+zbm_manage_detected_hostid: ""
+zbm_manage_kernel_commandline_tokens:
+  - "loglevel=7"
+  - "spl_hostid={{ zbm_manage_detected_hostid }}"
+  - "zbm.timeout=10"
+  - "zfs.zfs_arc_max=279172874240"
+  - "zfs.zfs_arc_min=68719476736"
+  - "zfs.zfs_arc_meta_limit_percent=50"
+  - "zfs.zfs_arc_sys_free=8589934592"
+  - "console=ttyS0,115200n8"
+  - "console=tty0"
+zbm_manage_kernel_commandline_extra_tokens: []
+
+zbm_manage_run_generate: false
+zbm_manage_generate_extra_args: ""
+
+zbm_manage_run_generate_on_change: false
+zbm_manage_post_generate_hooks: []
+
+zbm_manage_enable_efi_mirror_sync: true
+zbm_manage_primary_efi_mountpoint: "/boot/efi"
+zbm_manage_mirror_efi_mountpoint: "/boot/efi2"
+zbm_manage_mirror_efi_device: ""
+zbm_manage_mirror_sync_script_path: "/usr/local/sbin/sync-efi.sh"
+zbm_manage_mirror_sync_service_name: "efi-sync.service"
+zbm_manage_mirror_sync_path_name: "efi-sync.path"
+zbm_manage_mirror_sync_watch_path: "/boot/efi/EFI/ZBM"
+zbm_manage_run_mirror_sync_now: false

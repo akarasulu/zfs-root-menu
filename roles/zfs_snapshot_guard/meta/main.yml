@@ -1,0 +1,12 @@
+---
+galaxy_info:
+  role_name: zfs_snapshot_guard
+  author: "local"
+  description: "Wrap role execution in before/after recursive ZFS snapshots with rollback handling."
+  license: "MIT"
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Debian
+      versions:
+        - all
+dependencies: []

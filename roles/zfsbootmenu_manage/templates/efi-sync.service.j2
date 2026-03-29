@@ -1,0 +1,6 @@
+[Unit]
+Description=Mirror primary EFI contents to secondary ESP
+
+[Service]
+Type=oneshot
+ExecStart={{ zbm_manage_mirror_sync_script_path }}

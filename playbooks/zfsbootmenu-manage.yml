@@ -1,0 +1,11 @@
+---
+- name: Manage ZFSBootMenu tooling and boot pipeline
+  hosts: all
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Run zfsbootmenu_manage through ZFS snapshot guard
+      ansible.builtin.include_role:
+        name: zfs_snapshot_guard
+      vars:
+        zfs_guard_target_role: zfsbootmenu_manage

@@ -1,0 +1,32 @@
+---
+- name: run generate-zbm on change
+  ansible.builtin.command: >-
+    {{ zbm_manage_generate_zbm_path }}
+    {{ zbm_manage_generate_extra_args }}
+  when: zbm_manage_run_generate_on_change | bool
+  changed_when: true
+  notify:
+    - run mirrored EFI sync
+    - run post-generate hooks
+
+- name: reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: restart efi sync path
+  ansible.builtin.systemd:
+    name: "{{ zbm_manage_mirror_sync_path_name }}"
+    enabled: true
+    state: restarted
+  when: zbm_manage_enable_efi_mirror_sync | bool
+
+- name: run mirrored EFI sync
+  ansible.builtin.command: "{{ zbm_manage_mirror_sync_script_path }}"
+  when: zbm_manage_enable_efi_mirror_sync | bool
+  changed_when: true
+
+- name: run post-generate hooks
+  ansible.builtin.command: "{{ item }}"
+  loop: "{{ zbm_manage_post_generate_hooks }}"
+  when: zbm_manage_post_generate_hooks | length > 0
+  changed_when: true

@@ -1,0 +1,347 @@
+---
+- name: Ensure role is used on Debian-family hosts
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == "Debian"
+    fail_msg: "zfsbootmenu_manage currently supports Debian-family systems only."
+
+- name: Install build dependencies
+  ansible.builtin.package:
+    name: "{{ zbm_manage_packages }}"
+    state: present
+
+- name: Ensure ZFSBootMenu source checkout exists
+  ansible.builtin.git:
+    repo: "{{ zbm_manage_repo_url }}"
+    dest: "{{ zbm_manage_repo_dest }}"
+    version: "{{ zbm_manage_repo_version }}"
+    update: true
+    force: "{{ zbm_manage_repo_force }}"
+  register: zbm_manage_git_checkout
+
+- name: Check for built generate-zbm in source tree
+  ansible.builtin.stat:
+    path: "{{ zbm_manage_generate_zbm_src_path }}"
+  register: zbm_manage_generate_zbm_src_stat
+
+- name: Build ZFSBootMenu tooling
+  ansible.builtin.command:
+    cmd: "{{ zbm_manage_build_command }}"
+    chdir: "{{ zbm_manage_repo_dest }}"
+  when:
+    - not ansible_check_mode
+    - zbm_manage_force_rebuild | bool
+      or zbm_manage_git_checkout.changed
+      or not zbm_manage_generate_zbm_src_stat.stat.exists
+  changed_when: true
+
+- name: Re-check for built generate-zbm after build
+  ansible.builtin.stat:
+    path: "{{ zbm_manage_generate_zbm_src_path }}"
+  register: zbm_manage_generate_zbm_src_stat_after_build
+
+- name: Install generate-zbm binary
+  ansible.builtin.copy:
+    src: "{{ zbm_manage_generate_zbm_src_path }}"
+    dest: "{{ zbm_manage_generate_zbm_path }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - zbm_manage_generate_zbm_src_stat_after_build.stat.exists
+      or not ansible_check_mode
+  notify: run generate-zbm on change
+
+- name: Deploy VFIO modprobe config
+  ansible.builtin.template:
+    src: "vfio.conf.j2"
+    dest: "{{ zbm_manage_vfio_modprobe_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - zbm_manage_vfio_enable | bool
+    - zbm_manage_vfio_ids | length > 0
+
+- name: Deploy VFIO dracut config
+  ansible.builtin.template:
+    src: "vfio-dracut.conf.j2"
+    dest: "{{ zbm_manage_vfio_dracut_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when:
+    - zbm_manage_vfio_enable | bool
+    - zbm_manage_vfio_ids | length > 0
+
+- name: Read running kernel version
+  ansible.builtin.command: uname -r
+  register: zbm_manage_running_kernel
+  changed_when: false
+  check_mode: false
+  when: zbm_manage_rebuild_initramfs | bool
+
+- name: Resolve initramfs rebuild target
+  ansible.builtin.set_fact:
+    zbm_manage_effective_initramfs_kernel: >-
+      {{
+        zbm_manage_initramfs_kernel
+        if (zbm_manage_initramfs_kernel | length > 0)
+        else (zbm_manage_running_kernel.stdout | trim)
+      }}
+    zbm_manage_effective_initramfs_path: >-
+      {{
+        zbm_manage_initramfs_path
+        if (zbm_manage_initramfs_path | length > 0)
+        else ('/boot/initrd.img-' ~ (
+          zbm_manage_initramfs_kernel
+          if (zbm_manage_initramfs_kernel | length > 0)
+          else (zbm_manage_running_kernel.stdout | trim)
+        ))
+      }}
+  when: zbm_manage_rebuild_initramfs | bool
+
+- name: Rebuild initramfs with dracut
+  ansible.builtin.command: >-
+    dracut --force {{ zbm_manage_effective_initramfs_path }} {{ zbm_manage_effective_initramfs_kernel }}
+  when:
+    - zbm_manage_rebuild_initramfs | bool
+    - not ansible_check_mode
+  changed_when: true
+
+- name: Verify rebuilt initramfs exists
+  ansible.builtin.stat:
+    path: "{{ zbm_manage_effective_initramfs_path }}"
+  register: zbm_manage_initramfs_stat
+  when:
+    - zbm_manage_rebuild_initramfs | bool
+    - not ansible_check_mode
+
+- name: Assert initramfs exists after rebuild
+  ansible.builtin.assert:
+    that:
+      - zbm_manage_initramfs_stat.stat.exists
+    fail_msg: "Expected initramfs not found at {{ zbm_manage_effective_initramfs_path }} after dracut rebuild."
+  when:
+    - zbm_manage_rebuild_initramfs | bool
+    - not ansible_check_mode
+
+- name: Verify rebuilt initramfs contains ZFS support
+  ansible.builtin.shell: |
+    set -euo pipefail
+    initrd_listing=""
+    if command -v lsinitrd >/dev/null 2>&1; then
+      initrd_listing="$(lsinitrd "{{ zbm_manage_effective_initramfs_path }}" || true)"
+    elif command -v lsinitramfs >/dev/null 2>&1; then
+      initrd_listing="$(lsinitramfs "{{ zbm_manage_effective_initramfs_path }}" || true)"
+    else
+      exit 1
+    fi
+    grep -Eq '(^|/)(zfs|zpool|mount\.zfs|vdev_id|hostid)($|/)' <<<"$initrd_listing"
+  args:
+    executable: /bin/bash
+  when:
+    - zbm_manage_rebuild_initramfs | bool
+    - zbm_manage_verify_initramfs_contains_zfs | bool
+    - not ansible_check_mode
+  changed_when: false
+
+- name: Ensure ZFSBootMenu config directory exists
+  ansible.builtin.file:
+    path: "{{ zbm_manage_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Deploy ZFSBootMenu config from template
+  ansible.builtin.template:
+    src: "config.yaml.j2"
+    dest: "{{ zbm_manage_config_path }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: zbm_manage_config_content | length == 0
+  notify: run generate-zbm on change
+
+- name: Deploy ZFSBootMenu config from raw content override
+  ansible.builtin.copy:
+    dest: "{{ zbm_manage_config_path }}"
+    content: "{{ zbm_manage_config_content | trim }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  when: zbm_manage_config_content | length > 0
+  notify: run generate-zbm on change
+
+- name: Collect mounted paths for validation
+  ansible.builtin.set_fact:
+    zbm_manage_current_mountpoints: "{{ ansible_facts.mounts | map(attribute='mount') | list }}"
+  when: zbm_manage_validate_mounts | bool
+
+- name: Validate required mount points
+  ansible.builtin.assert:
+    that:
+      - item in zbm_manage_current_mountpoints
+    fail_msg: "Required mount point {{ item }} is not mounted."
+  loop: "{{ zbm_manage_required_mountpoints }}"
+  when: zbm_manage_validate_mounts | bool
+
+- name: Read host bootfs dataset
+  ansible.builtin.command: zpool get -H -o value bootfs {{ zbm_manage_zpool_name }}
+  register: zbm_manage_bootfs
+  changed_when: false
+  check_mode: false
+  when: zbm_manage_set_kernel_commandline | bool and zbm_manage_apply_commandline_to_bootfs | bool
+
+- name: Read hostid for spl_hostid kernel parameter
+  ansible.builtin.command: od -An -N4 -tx4 /etc/hostid
+  register: zbm_manage_hostid
+  changed_when: false
+  check_mode: false
+  when: zbm_manage_set_kernel_commandline | bool
+
+- name: Resolve detected hostid for kernel commandline
+  ansible.builtin.set_fact:
+    zbm_manage_detected_hostid: "{{ zbm_manage_hostid.stdout | regex_replace('\\s+', '') }}"
+  when: zbm_manage_set_kernel_commandline | bool
+
+- name: Build effective kernel commandline values
+  ansible.builtin.set_fact:
+    zbm_manage_effective_kernel_commandline_tokens: >-
+      {{ zbm_manage_kernel_commandline_tokens + zbm_manage_kernel_commandline_extra_tokens }}
+    zbm_manage_effective_kernel_commandline: >-
+      {{ (zbm_manage_kernel_commandline_tokens + zbm_manage_kernel_commandline_extra_tokens) | join(' ') }}
+  when: zbm_manage_set_kernel_commandline | bool
+
+- name: Set commandline target datasets
+  ansible.builtin.set_fact:
+    zbm_manage_commandline_datasets: >-
+      {{
+        ([zbm_manage_root_dataset]
+        + (
+          [zbm_manage_bootfs.stdout | trim]
+          if (
+            (zbm_manage_apply_commandline_to_bootfs | bool)
+            and ((zbm_manage_bootfs.stdout | trim) not in ['', '-'])
+          )
+          else []
+        ))
+        | unique
+      }}
+  when: zbm_manage_set_kernel_commandline | bool
+
+- name: Read current org.zfsbootmenu:commandline on target datasets
+  ansible.builtin.command: >-
+    zfs get -H -o value org.zfsbootmenu:commandline {{ item }}
+  loop: "{{ zbm_manage_commandline_datasets }}"
+  register: zbm_manage_current_commandlines
+  changed_when: false
+  check_mode: false
+  when: zbm_manage_set_kernel_commandline | bool
+
+- name: Apply org.zfsbootmenu:commandline on target datasets
+  ansible.builtin.command: >-
+    zfs set org.zfsbootmenu:commandline="{{ zbm_manage_effective_kernel_commandline }}" {{ item.item }}
+  loop: "{{ zbm_manage_current_commandlines.results }}"
+  changed_when: true
+  when:
+    - zbm_manage_set_kernel_commandline | bool
+    - (item.stdout | trim) != zbm_manage_effective_kernel_commandline
+
+- name: Discover mirror EFI device from fstab when unset
+  ansible.builtin.command: >-
+    awk '$2=="{{ zbm_manage_mirror_efi_mountpoint }}" && $1 !~ /^#/ { print $1; exit }' /etc/fstab
+  register: zbm_manage_discovered_mirror_efi_device
+  changed_when: false
+  check_mode: false
+  when:
+    - zbm_manage_enable_efi_mirror_sync | bool
+    - zbm_manage_mirror_efi_device | length == 0
+
+- name: Resolve mirror EFI device
+  ansible.builtin.set_fact:
+    zbm_manage_effective_mirror_efi_device: >-
+      {{
+        zbm_manage_mirror_efi_device
+        if (zbm_manage_mirror_efi_device | length > 0)
+        else (zbm_manage_discovered_mirror_efi_device.stdout | trim)
+      }}
+  when: zbm_manage_enable_efi_mirror_sync | bool
+
+- name: Validate mirror EFI device
+  ansible.builtin.assert:
+    that:
+      - zbm_manage_effective_mirror_efi_device | length > 0
+    fail_msg: >-
+      Mirror EFI device is unset and could not be discovered from /etc/fstab
+      for {{ zbm_manage_mirror_efi_mountpoint }}.
+  when: zbm_manage_enable_efi_mirror_sync | bool
+
+- name: Ensure mirror EFI mountpoint directory exists
+  ansible.builtin.file:
+    path: "{{ zbm_manage_mirror_efi_mountpoint }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: zbm_manage_enable_efi_mirror_sync | bool
+
+- name: Install EFI mirror sync script
+  ansible.builtin.template:
+    src: "sync-efi.sh.j2"
+    dest: "{{ zbm_manage_mirror_sync_script_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+  when: zbm_manage_enable_efi_mirror_sync | bool
+  notify: run mirrored EFI sync
+
+- name: Install EFI mirror sync service unit
+  ansible.builtin.template:
+    src: "efi-sync.service.j2"
+    dest: "/etc/systemd/system/{{ zbm_manage_mirror_sync_service_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: zbm_manage_enable_efi_mirror_sync | bool
+  notify:
+    - reload systemd
+    - restart efi sync path
+
+- name: Install EFI mirror sync path unit
+  ansible.builtin.template:
+    src: "efi-sync.path.j2"
+    dest: "/etc/systemd/system/{{ zbm_manage_mirror_sync_path_name }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: zbm_manage_enable_efi_mirror_sync | bool
+  notify:
+    - reload systemd
+    - restart efi sync path
+
+- name: Ensure EFI mirror sync path unit is enabled and started
+  ansible.builtin.systemd:
+    name: "{{ zbm_manage_mirror_sync_path_name }}"
+    enabled: true
+    state: started
+  when: zbm_manage_enable_efi_mirror_sync | bool
+
+- name: Optionally generate ZBM image explicitly
+  ansible.builtin.command: >-
+    {{ zbm_manage_generate_zbm_path }}
+    {{ zbm_manage_generate_extra_args }}
+  when: zbm_manage_run_generate | bool
+  changed_when: true
+  notify:
+    - run mirrored EFI sync
+    - run post-generate hooks
+
+- name: Optionally run mirror EFI sync now
+  ansible.builtin.command: "{{ zbm_manage_mirror_sync_script_path }}"
+  when:
+    - zbm_manage_enable_efi_mirror_sync | bool
+    - zbm_manage_run_mirror_sync_now | bool
+  changed_when: true

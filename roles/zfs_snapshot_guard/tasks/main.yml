@@ -1,0 +1,164 @@
+---
+- name: Validate target role is set
+  ansible.builtin.assert:
+    that:
+      - zfs_guard_target_role | length > 0
+    fail_msg: "zfs_guard_target_role must be set."
+  when: zfs_guard_enabled | bool
+
+- name: Build snapshot timestamp
+  ansible.builtin.command: "date {{ zfs_guard_timestamp_format }}"
+  register: zfs_guard_timestamp_cmd
+  changed_when: false
+  when: zfs_guard_enabled | bool
+
+- name: Build snapshot/BE names
+  ansible.builtin.set_fact:
+    zfs_guard_timestamp: "{{ zfs_guard_timestamp_cmd.stdout | trim }}"
+    zfs_guard_target_role_slug: "{{ zfs_guard_target_role | regex_replace('[^A-Za-z0-9_.-]', '-') }}"
+    zfs_guard_snapshot_before_name: >-
+      {{ zfs_guard_before_prefix }}-{{ zfs_guard_target_role | regex_replace('[^A-Za-z0-9_.-]', '-') }}-{{ zfs_guard_timestamp_cmd.stdout | trim }}
+    zfs_guard_snapshot_after_name: >-
+      {{ zfs_guard_after_prefix }}-{{ zfs_guard_target_role | regex_replace('[^A-Za-z0-9_.-]', '-') }}-{{ zfs_guard_timestamp_cmd.stdout | trim }}
+  when: zfs_guard_enabled | bool
+
+- name: Run guarded role with ZFS snapshot envelope
+  when: zfs_guard_enabled | bool
+  block:
+    - name: Create before snapshot recursively
+      ansible.builtin.command: "zfs snapshot -r {{ zfs_guard_pool }}@{{ zfs_guard_snapshot_before_name }}"
+      changed_when: true
+
+    - name: Execute wrapped role
+      ansible.builtin.include_role:
+        name: "{{ zfs_guard_target_role }}"
+
+    - name: Probe actual filesystem changes since before snapshot
+      ansible.builtin.shell: |
+        set -euo pipefail
+        changed=0
+        while IFS= read -r ds; do
+          snap="${ds}@{{ zfs_guard_snapshot_before_name }}"
+          if zfs list -H -t snapshot "$snap" >/dev/null 2>&1; then
+            if zfs diff -FH "$snap" 2>/dev/null | grep -q .; then
+              changed=1
+              break
+            fi
+          fi
+        done < <(zfs list -H -o name -r {{ zfs_guard_pool }})
+        if [ "$changed" -eq 1 ]; then
+          echo changed
+        else
+          echo unchanged
+        fi
+      args:
+        executable: /bin/bash
+      register: zfs_guard_change_probe
+      changed_when: false
+      when: not ansible_check_mode
+
+    - name: Capture wrapped role changed status from ZFS diff probe
+      ansible.builtin.set_fact:
+        zfs_guard_wrapped_role_changed: "{{ (zfs_guard_change_probe.stdout | trim) == 'changed' }}"
+      when: not ansible_check_mode
+
+    - name: Set wrapped role changed status in check mode
+      ansible.builtin.set_fact:
+        zfs_guard_wrapped_role_changed: false
+      when: ansible_check_mode
+
+    - name: Create after snapshot when wrapped role changed state
+      ansible.builtin.command: "zfs snapshot -r {{ zfs_guard_pool }}@{{ zfs_guard_snapshot_after_name }}"
+      when:
+        - zfs_guard_create_after_on_success | bool
+        - zfs_guard_wrapped_role_changed | bool
+      changed_when: true
+
+    - name: Prune before snapshot when wrapped role made no changes
+      ansible.builtin.command: "zfs destroy -r {{ zfs_guard_pool }}@{{ zfs_guard_snapshot_before_name }}"
+      when:
+        - zfs_guard_prune_before_on_nochange | bool
+        - not zfs_guard_wrapped_role_changed | bool
+      changed_when: true
+
+  rescue:
+    - name: Attempt live rollback to before snapshot
+      ansible.builtin.command: "zfs rollback -r {{ zfs_guard_pool }}@{{ zfs_guard_snapshot_before_name }}"
+      register: zfs_guard_live_rollback
+      failed_when: false
+      changed_when: "(zfs_guard_live_rollback.rc | default(1)) == 0"
+      when: zfs_guard_live_rollback_on_failure | bool
+
+    - name: Destroy before snapshot after successful rollback
+      ansible.builtin.command: "zfs destroy -r {{ zfs_guard_pool }}@{{ zfs_guard_snapshot_before_name }}"
+      when:
+        - zfs_guard_destroy_before_on_failure | bool
+        - zfs_guard_live_rollback_on_failure | bool
+        - (zfs_guard_live_rollback.rc | default(1)) == 0
+      changed_when: true
+
+    - name: Read current bootfs dataset for fallback BE
+      ansible.builtin.command: "zpool get -H -o value bootfs {{ zfs_guard_pool }}"
+      register: zfs_guard_bootfs
+      changed_when: false
+      when:
+        - zfs_guard_fallback_be_on_rollback_fail | bool
+        - (not (zfs_guard_live_rollback_on_failure | bool)) or ((zfs_guard_live_rollback.rc | default(1)) != 0)
+
+    - name: Build fallback BE dataset path
+      ansible.builtin.set_fact:
+        zfs_guard_fallback_be_dataset: >-
+          {{
+            (zfs_guard_bootfs.stdout | trim | regex_replace('/[^/]+$', ''))
+            ~ '/'
+            ~ zfs_guard_fallback_be_prefix
+            ~ '-'
+            ~ zfs_guard_target_role_slug
+            ~ '-'
+            ~ zfs_guard_timestamp
+          }}
+      when:
+        - zfs_guard_fallback_be_on_rollback_fail | bool
+        - (not (zfs_guard_live_rollback_on_failure | bool)) or ((zfs_guard_live_rollback.rc | default(1)) != 0)
+
+    - name: Clone fallback BE from before snapshot
+      ansible.builtin.command: >-
+        zfs clone
+        {{ (zfs_guard_bootfs.stdout | trim) }}@{{ zfs_guard_snapshot_before_name }}
+        {{ zfs_guard_fallback_be_dataset }}
+      when:
+        - zfs_guard_fallback_be_on_rollback_fail | bool
+        - (not (zfs_guard_live_rollback_on_failure | bool)) or ((zfs_guard_live_rollback.rc | default(1)) != 0)
+      changed_when: true
+
+    - name: Point pool bootfs to fallback BE
+      ansible.builtin.command: "zpool set bootfs={{ zfs_guard_fallback_be_dataset }} {{ zfs_guard_pool }}"
+      when:
+        - zfs_guard_fallback_be_on_rollback_fail | bool
+        - (not (zfs_guard_live_rollback_on_failure | bool)) or ((zfs_guard_live_rollback.rc | default(1)) != 0)
+      changed_when: true
+
+    - name: Optionally reboot to fallback BE
+      ansible.builtin.reboot:
+        reboot_timeout: 600
+      when:
+        - zfs_guard_auto_reboot_to_fallback_be | bool
+        - zfs_guard_fallback_be_on_rollback_fail | bool
+        - (not (zfs_guard_live_rollback_on_failure | bool)) or ((zfs_guard_live_rollback.rc | default(1)) != 0)
+
+    - name: Fail after guarded role failure handling
+      ansible.builtin.fail:
+        msg: >-
+          Wrapped role {{ zfs_guard_target_role }} failed.
+          {% if zfs_guard_live_rollback_on_failure | bool and (zfs_guard_live_rollback.rc | default(1)) == 0 %}
+          Live rollback to {{ zfs_guard_pool }}@{{ zfs_guard_snapshot_before_name }} succeeded and before snapshot was removed.
+          {% elif zfs_guard_fallback_be_on_rollback_fail | bool %}
+          Live rollback failed; fallback boot environment {{ zfs_guard_fallback_be_dataset }} was created from snapshot {{ zfs_guard_snapshot_before_name }}.
+          {% else %}
+          Live rollback did not complete; manual rollback from snapshot {{ zfs_guard_snapshot_before_name }} is required.
+          {% endif %}
+
+- name: Execute target role directly when guard is disabled
+  ansible.builtin.include_role:
+    name: "{{ zfs_guard_target_role }}"
+  when: not zfs_guard_enabled | bool

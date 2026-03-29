@@ -217,6 +217,74 @@ sudo /home/user/zfs-root-menu.sh --repair-chroot
 
 Use this after updating `zfs-root-menu.sh` in the live environment when you want to regenerate the target ZFSBootMenu image or target initramfs without repartitioning the disks again.
 
+## Ansible Workflow (Stein)
+
+This repo now includes an Ansible role and runtime config to manage the same boot pipeline on `stein`:
+
+- inventory: `inventory.yml`
+- config: `ansible.cfg`
+- playbook: `playbooks/zfsbootmenu-manage.yml`
+- host vars: `host_vars/stein.yml`
+- role: `roles/zfsbootmenu_manage`
+
+The role handles:
+
+- building/installing `generate-zbm`
+- optional initramfs rebuild using `dracut`
+- setting `org.zfsbootmenu:commandline` on ZFS datasets
+- mirrored ESP sync using `/usr/local/sbin/sync-efi.sh` and `efi-sync.path`
+
+Playbook execution is wrapped by `roles/zfs_snapshot_guard` to create snapshot envelopes:
+
+- `before-<role>-<timestamp>` before execution
+- `after-<role>-<timestamp>` only when changes occur
+- if no changes occur, the `before-*` snapshot is removed
+
+### Check pass first
+
+```bash
+ansible-playbook playbooks/zfsbootmenu-manage.yml --limit stein --check --diff
+```
+
+### Apply run
+
+```bash
+ansible-playbook playbooks/zfsbootmenu-manage.yml --limit stein
+```
+
+### Extend kernel parameters
+
+Edit `host_vars/stein.yml`:
+
+```yaml
+zbm_manage_kernel_commandline_extra_tokens:
+  - intel_iommu=on
+  - iommu=pt
+  - vfio-pci.ids=10de:1b06,10de:10ef
+```
+
+Then run check/apply again.
+
+Detailed operational runbook:
+
+- `docs/ansible-zbm-role-runbook.md`
+- `docs/role-zfs_snapshot_guard.md`
+- `docs/role-zfsbootmenu_manage.md`
+
+### Compare against snapshot
+
+Find latest baseline snapshot:
+
+```bash
+ssh root@stein 'zfs list -H -t snapshot -o name -s creation | grep "zroot@pre-vfio-passthru-" | tail -n1'
+```
+
+Diff current root dataset against that snapshot:
+
+```bash
+ssh root@stein 'SNAP_TAG=$(zfs list -H -t snapshot -o name -s creation | sed -n "s#^zroot@\\(pre-vfio-passthru-.*\\)#\\1#p" | tail -n1); zfs diff -FH zroot/ROOT/trixie@"$SNAP_TAG"'
+```
+
 ## Known Pitfalls
 
 - PTYs can break if `/dev`, `/proc`, and `/sys` are bind-mounted into the target chroot without `rslave` propagation controls. This was fixed in the script, but it is the first thing to suspect if `sudo` starts failing after the installer runs.

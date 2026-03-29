@@ -1,0 +1,4 @@
+options vfio-pci ids={{ zbm_manage_vfio_ids | join(',') }}
+{% for module_name in zbm_manage_vfio_softdep_modules %}
+softdep {{ module_name }} pre: vfio-pci
+{% endfor %}

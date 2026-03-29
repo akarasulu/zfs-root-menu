@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch ZBM EFI path and mirror to secondary ESP
+
+[Path]
+PathChanged={{ zbm_manage_mirror_sync_watch_path }}
+
+[Install]
+WantedBy=multi-user.target

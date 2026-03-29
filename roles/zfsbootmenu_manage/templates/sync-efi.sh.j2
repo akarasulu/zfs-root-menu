@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mountpoint -q {{ zbm_manage_mirror_efi_mountpoint }} || mount {{ zbm_manage_effective_mirror_efi_device }} {{ zbm_manage_mirror_efi_mountpoint }}
+rsync -a --delete {{ zbm_manage_primary_efi_mountpoint }}/ {{ zbm_manage_mirror_efi_mountpoint }}/
+sync
+if mountpoint -q {{ zbm_manage_mirror_efi_mountpoint }}; then
+  umount {{ zbm_manage_mirror_efi_mountpoint }} 2>/dev/null || umount -l {{ zbm_manage_mirror_efi_mountpoint }} 2>/dev/null || true
+fi
