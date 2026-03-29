@@ -9,6 +9,9 @@ description: "ChatGPT is your AI chatbot for everyday use. Chat with the most ad
 tags:
   - "clippings"
 ---
+
+> This is where the thought began. I asked ChatGPT about installing ZFSBootMenu tooling on Stein, and it gave a detailed breakdown of why it’s important, how to do it safely, and what workflows it unlocks. The conversation evolved into a step-by-step guide for you to follow, with a strong emphasis on safety (ZFS snapshots) and understanding the current state of your system before making changes.
+
 We might need to install the zfsbootmenu and dracut build tools so we do not have to boot from livecd with those tools to rebuild initramfs images. WDYT
 
 Short answer: **yes — you absolutely should install both dracut and ZFSBootMenu tooling directly on Stein.**
@@ -29,7 +32,7 @@ Your system has three defining traits:
 
 That combo **expects you to rebuild boot artifacts from inside the system**, not externally.
 
-### What you gain:
+### What you gain
 
 - 🔁 Rapid iteration on kernel params (VFIO, IOMMU, NIC quirks)
 - 🔧 No more chroot gymnastics from live ISO
@@ -267,13 +270,13 @@ Good instinct — take the snapshot **first**, *then* touch boot plumbing. That�
 
 You want a clean rollback point of your root pool (`zroot`) before messing with initramfs / boot.
 
-### Recommended command:
+### Recommended command
 
 ```markdown
 Bashzfs snapshot -r zroot@pre-zbm-setup-$(date +%Y%m%d-%H%M)
 ```
 
-### Example snapshot name:
+### Example snapshot name
 
 ```markdown
 zroot@pre-zbm-setup-20260329-1130
