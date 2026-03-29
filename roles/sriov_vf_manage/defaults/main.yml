@@ -1,0 +1,36 @@
+---
+sriov_vf_manage_enable: false
+
+# If true, manage every SR-IOV-capable PF discovered on host.
+sriov_vf_manage_manage_all_capable_pfs: false
+
+# Explicit PF config list used when sriov_vf_manage_manage_all_capable_pfs is false.
+# Each item:
+#   interface: enpXsYfZ
+#   numvfs: 4
+#   passthrough_vf_indexes: [0, 1]
+#   bind_all_vfs: false
+sriov_vf_manage_pf_configs: []
+
+# Defaults used for auto-managed PFs when sriov_vf_manage_manage_all_capable_pfs is true.
+sriov_vf_manage_default_numvfs: 4
+sriov_vf_manage_default_passthrough_vf_indexes: []
+sriov_vf_manage_default_bind_all_vfs: false
+
+# Optional per-interface overrides for auto-managed PFs.
+# Example:
+# sriov_vf_manage_pf_overrides:
+#   enp137s0f0:
+#     numvfs: 8
+#     passthrough_vf_indexes: [0,1,2,3]
+#     bind_all_vfs: true
+sriov_vf_manage_pf_overrides: {}
+
+sriov_vf_manage_script_path: "/usr/local/sbin/sriov-vf-manage.sh"
+sriov_vf_manage_service_name: "sriov-vf-manage.service"
+sriov_vf_manage_apply_now: true
+sriov_vf_manage_enable_service: true
+
+# Services that should start only after SR-IOV setup completed.
+sriov_vf_manage_before_services:
+  - libvirtd.service

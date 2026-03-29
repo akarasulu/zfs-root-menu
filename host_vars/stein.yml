@@ -36,3 +36,32 @@ zbm_manage_run_mirror_sync_now: false
 
 zbm_manage_run_generate: false
 zbm_manage_run_generate_on_change: false
+
+# SR-IOV VF lifecycle for NIC passthrough (separate from GPU VFIO settings above).
+sriov_vf_manage_enable: true
+sriov_vf_manage_manage_all_capable_pfs: false
+sriov_vf_manage_pf_configs:
+  # enoX devices are from the 4-port Intel X550-T2 with max 7 VFs
+  # 4 for now, 3 for 3 OpenWrt VMs, 1 extra maybe for a Podman Apps VM in the future.
+  # ispnet
+  - interface: eno1
+    numvfs: 4
+    bind_all_vfs: true
+  # appnet
+  - interface: eno2
+    numvfs: 4
+    bind_all_vfs: true
+  - interface: eno3
+    numvfs: 0
+    bind_all_vfs: true
+  - interface: eno4
+    numvfs: 0
+    bind_all_vfs: true
+  # 10GbE NICs, enp137s0f0 and enp137s0f1 with max 63 VFs.
+  - interface: enp137s0f0
+    numvfs: 4
+    bind_all_vfs: true
+  - interface: enp137s0f1
+    numvfs: 0
+    bind_all_vfs: true
+sriov_vf_manage_apply_now: true

@@ -1,0 +1,16 @@
+[Unit]
+Description=Configure SR-IOV VF lifecycle and VFIO bindings
+Wants=systemd-udev-settle.service
+After=systemd-udev-settle.service
+{% for svc in sriov_vf_manage_before_services %}
+Before={{ svc }}
+{% endfor %}
+ConditionPathExists={{ sriov_vf_manage_script_path }}
+
+[Service]
+Type=oneshot
+ExecStart={{ sriov_vf_manage_script_path }}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

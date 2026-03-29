@@ -226,6 +226,7 @@ This repo now includes an Ansible role and runtime config to manage the same boo
 - playbook: `playbooks/zfsbootmenu-manage.yml`
 - host vars: `host_vars/stein.yml`
 - role: `roles/zfsbootmenu_manage`
+- role: `roles/sriov_vf_manage`
 
 The role handles:
 
@@ -265,11 +266,52 @@ zbm_manage_kernel_commandline_extra_tokens:
 
 Then run check/apply again.
 
+### SR-IOV NIC VF passthrough
+
+`roles/sriov_vf_manage` handles NIC SR-IOV VF lifecycle separately from GPU passthrough:
+
+- keeps PF networking on host drivers (no PF binding to `vfio-pci`)
+- creates VFs via `sriov_numvfs`
+- binds only selected VF indexes to `vfio-pci`
+- persists lifecycle via `sriov-vf-manage.service`
+
+Current `host_vars/stein.yml` uses explicit PF interface configs with per-PF VF counts:
+
+```yaml
+sriov_vf_manage_enable: true
+sriov_vf_manage_manage_all_capable_pfs: false
+sriov_vf_manage_pf_configs:
+  - interface: eno1
+    numvfs: 4
+    bind_all_vfs: true
+  - interface: eno2
+    numvfs: 4
+    bind_all_vfs: true
+  - interface: eno3
+    numvfs: 0
+    bind_all_vfs: true
+  - interface: eno4
+    numvfs: 0
+    bind_all_vfs: true
+  - interface: enp137s0f0
+    numvfs: 4
+    bind_all_vfs: true
+  - interface: enp137s0f1
+    numvfs: 0
+    bind_all_vfs: true
+```
+
 Detailed operational runbook:
 
 - `docs/ansible-zbm-role-runbook.md`
 - `docs/role-zfs_snapshot_guard.md`
 - `docs/role-zfsbootmenu_manage.md`
+- `docs/role-sriov_vf_manage.md`
+- `docs/sriov-vf-stein-rollout-summary.md`
+
+The latest stein rollout details (design choices, apply/reboot validation, and final state) are documented in:
+
+- `docs/sriov-vf-stein-rollout-summary.md`
 
 ### Compare against snapshot
 

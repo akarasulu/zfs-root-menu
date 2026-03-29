@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+  printf '[sriov-vf-manage] %s\n' "$*"
+}
+
+write_bdf_with_retry() {
+  local target="$1"
+  local bdf="$2"
+  local action="$3"
+  local attempts=20
+  local i
+
+  for i in $(seq 1 "$attempts"); do
+    if echo "$bdf" > "$target" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  log "Failed to ${action} for $bdf via $target after ${attempts} attempts"
+  return 1
+}
+
+modprobe vfio-pci || true
+
+{% for pf in sriov_vf_manage_effective_pf_configs %}
+log "Configuring PF interface {{ pf.interface }}"
+pf_device_link="/sys/class/net/{{ pf.interface }}/device"
+if [ ! -e "$pf_device_link" ]; then
+  log "PF interface {{ pf.interface }} has no PCI device; skipping"
+else
+  pf_device_path="$(readlink -f "$pf_device_link")"
+  pf_bdf="$(basename "$pf_device_path")"
+
+  total_vfs="$(cat "$pf_device_path/sriov_totalvfs")"
+  target_vfs="{{ pf.numvfs | int }}"
+
+  if [ "$target_vfs" -gt "$total_vfs" ]; then
+    log "Requested $target_vfs VFs exceeds total $total_vfs for $pf_bdf"
+    exit 1
+  fi
+
+  current_vfs="$(cat "$pf_device_path/sriov_numvfs")"
+  if [ "$current_vfs" != "$target_vfs" ]; then
+    if [ "$current_vfs" != "0" ]; then
+      log "Resetting $pf_bdf sriov_numvfs from $current_vfs to 0"
+      echo 0 > "$pf_device_path/sriov_numvfs"
+    fi
+    log "Setting $pf_bdf sriov_numvfs to $target_vfs"
+    echo "$target_vfs" > "$pf_device_path/sriov_numvfs"
+  fi
+
+  desired_vf_bdfs=()
+{% for vf_index in (pf.passthrough_vf_indexes | default([])) %}
+  if [ ! -L "$pf_device_path/virtfn{{ vf_index | int }}" ]; then
+    log "Missing VF index {{ vf_index | int }} on PF $pf_bdf"
+    exit 1
+  fi
+  vf_device_path="$(readlink -f "$pf_device_path/virtfn{{ vf_index | int }}")"
+  vf_bdf="$(basename "$vf_device_path")"
+  vf_sysfs_path="/sys/bus/pci/devices/$vf_bdf"
+  desired_vf_bdfs+=("$vf_bdf")
+
+  current_driver=""
+  if [ -L "$vf_sysfs_path/driver" ]; then
+    current_driver="$(basename "$(readlink -f "$vf_sysfs_path/driver")")"
+  fi
+
+  if [ "$current_driver" != "vfio-pci" ]; then
+    if [ -n "$current_driver" ]; then
+      log "Unbinding VF $vf_bdf from $current_driver"
+      write_bdf_with_retry "$vf_sysfs_path/driver/unbind" "$vf_bdf" "unbind"
+    fi
+
+    log "Binding VF $vf_bdf to vfio-pci"
+    echo vfio-pci > "$vf_sysfs_path/driver_override"
+    write_bdf_with_retry "/sys/bus/pci/drivers_probe" "$vf_bdf" "probe vfio-pci bind"
+  fi
+{% endfor %}
+
+  for vf_link in "$pf_device_path"/virtfn*; do
+    [ -e "$vf_link" ] || continue
+    vf_device_path="$(readlink -f "$vf_link")"
+    vf_bdf="$(basename "$vf_device_path")"
+    vf_sysfs_path="/sys/bus/pci/devices/$vf_bdf"
+
+    desired=0
+    for wanted in "${desired_vf_bdfs[@]:-}"; do
+      if [ "$vf_bdf" = "$wanted" ]; then
+        desired=1
+        break
+      fi
+    done
+
+    if [ "$desired" -eq 0 ]; then
+      # Ensure non-selected VFs are not pinned to vfio-pci.
+      current_driver=""
+      if [ -L "$vf_sysfs_path/driver" ]; then
+        current_driver="$(basename "$(readlink -f "$vf_sysfs_path/driver")")"
+      fi
+
+      if [ "$current_driver" = "vfio-pci" ]; then
+        log "Returning VF $vf_bdf from vfio-pci to default host driver"
+        write_bdf_with_retry "$vf_sysfs_path/driver/unbind" "$vf_bdf" "unbind from vfio-pci"
+        : > "$vf_sysfs_path/driver_override"
+        write_bdf_with_retry "/sys/bus/pci/drivers_probe" "$vf_bdf" "probe host driver bind"
+      else
+        : > "$vf_sysfs_path/driver_override"
+      fi
+    fi
+  done
+fi
+{% endfor %}
+
+log "SR-IOV VF lifecycle completed"

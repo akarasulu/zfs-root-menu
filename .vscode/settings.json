@@ -1,13 +1,18 @@
 {
     "cSpell.words": [
+        "bootfs",
         "BOOTX",
         "DKMS",
         "dracut",
         "HARDDISK",
         "hostid",
+        "iommu",
         "mountpoint",
+        "numvfs",
         "NVRAM",
+        "passthru",
         "rslave",
+        "sriov",
         "Trixie",
         "UEFI",
         "userspace",

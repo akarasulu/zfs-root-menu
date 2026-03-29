@@ -1,0 +1,177 @@
+---
+- name: Manage SR-IOV VF lifecycle
+  when: sriov_vf_manage_enable | bool
+  block:
+    - name: Ensure role is used on Debian-family hosts
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.os_family == "Debian"
+        fail_msg: "sriov_vf_manage currently supports Debian-family systems only."
+
+    - name: Discover SR-IOV-capable PF interfaces
+      ansible.builtin.shell: |
+        set -euo pipefail
+        for n in /sys/class/net/*; do
+          iface="${n##*/}"
+          [ -r "$n/device/sriov_totalvfs" ] || continue
+          total="$(cat "$n/device/sriov_totalvfs")"
+          [ "$total" -gt 0 ] || continue
+          printf '%s\n' "$iface"
+        done | sort -u
+      args:
+        executable: /bin/bash
+      register: sriov_vf_manage_discovered
+      changed_when: false
+      check_mode: false
+
+    - name: Capture discovered SR-IOV-capable PF interfaces
+      ansible.builtin.set_fact:
+        sriov_vf_manage_discovered_interfaces: >-
+          {{
+            sriov_vf_manage_discovered.stdout_lines
+            | map('trim')
+            | reject('equalto', '')
+            | list
+          }}
+
+    - name: Validate SR-IOV-capable interfaces were discovered
+      ansible.builtin.assert:
+        that:
+          - sriov_vf_manage_discovered_interfaces | length > 0
+        fail_msg: "No SR-IOV-capable PF interfaces were discovered on this host."
+
+    - name: Validate role input mode
+      ansible.builtin.assert:
+        that:
+          - sriov_vf_manage_manage_all_capable_pfs | bool or sriov_vf_manage_pf_configs | length > 0
+        fail_msg: >-
+          Set sriov_vf_manage_manage_all_capable_pfs=true or provide sriov_vf_manage_pf_configs.
+
+    - name: Initialize effective PF config list
+      ansible.builtin.set_fact:
+        sriov_vf_manage_effective_pf_configs: []
+
+    - name: Build effective PF configs from discovered interfaces
+      ansible.builtin.set_fact:
+        sriov_vf_manage_effective_pf_configs: "{{ sriov_vf_manage_effective_pf_configs + [sriov_vf_manage_pf_cfg] }}"
+      vars:
+        sriov_vf_manage_override: "{{ sriov_vf_manage_pf_overrides[item] | default({}) }}"
+        sriov_vf_manage_pf_cfg:
+          interface: "{{ item }}"
+          numvfs: "{{ sriov_vf_manage_override.numvfs | default(sriov_vf_manage_default_numvfs) | int }}"
+          bind_all_vfs: "{{ sriov_vf_manage_override.bind_all_vfs | default(sriov_vf_manage_default_bind_all_vfs) | bool }}"
+          passthrough_vf_indexes: "{{ sriov_vf_manage_override.passthrough_vf_indexes | default(sriov_vf_manage_default_passthrough_vf_indexes) }}"
+      loop: "{{ sriov_vf_manage_discovered_interfaces }}"
+      when: sriov_vf_manage_manage_all_capable_pfs | bool
+
+    - name: Build effective PF configs from explicit list
+      ansible.builtin.set_fact:
+        sriov_vf_manage_effective_pf_configs: "{{ sriov_vf_manage_effective_pf_configs + [sriov_vf_manage_pf_cfg] }}"
+      vars:
+        sriov_vf_manage_pf_cfg:
+          interface: "{{ item.interface }}"
+          numvfs: "{{ item.numvfs | default(sriov_vf_manage_default_numvfs) | int }}"
+          bind_all_vfs: "{{ item.bind_all_vfs | default(sriov_vf_manage_default_bind_all_vfs) | bool }}"
+          passthrough_vf_indexes: "{{ item.passthrough_vf_indexes | default(sriov_vf_manage_default_passthrough_vf_indexes) }}"
+      loop: "{{ sriov_vf_manage_pf_configs }}"
+      when: not sriov_vf_manage_manage_all_capable_pfs | bool
+
+    - name: Initialize normalized PF config list
+      ansible.builtin.set_fact:
+        sriov_vf_manage_normalized_pf_configs: []
+
+    - name: Normalize PF passthrough VF indexes
+      ansible.builtin.set_fact:
+        sriov_vf_manage_normalized_pf_configs: "{{ sriov_vf_manage_normalized_pf_configs + [sriov_vf_manage_normalized_pf_cfg] }}"
+      vars:
+        sriov_vf_manage_normalized_pf_cfg:
+          interface: "{{ item.interface }}"
+          numvfs: "{{ item.numvfs | int }}"
+          passthrough_vf_indexes: >-
+            {{
+              (range(0, item.numvfs | int) | list)
+              if (item.bind_all_vfs | default(false) | bool)
+              else (item.passthrough_vf_indexes | default([]) | map('int') | list)
+            }}
+      loop: "{{ sriov_vf_manage_effective_pf_configs }}"
+
+    - name: Apply normalized PF config list
+      ansible.builtin.set_fact:
+        sriov_vf_manage_effective_pf_configs: >-
+          {{
+            sriov_vf_manage_normalized_pf_configs
+          }}
+
+    - name: Validate effective PF config list is not empty
+      ansible.builtin.assert:
+        that:
+          - sriov_vf_manage_effective_pf_configs | length > 0
+        fail_msg: "No PF interfaces remain to manage after applying safety filters."
+
+    - name: Validate managed PF interfaces are SR-IOV-capable
+      ansible.builtin.assert:
+        that:
+          - item.interface in sriov_vf_manage_discovered_interfaces
+        fail_msg: "Interface {{ item.interface }} is not SR-IOV-capable or not present."
+      loop: "{{ sriov_vf_manage_effective_pf_configs }}"
+
+    - name: Validate PF config numvfs and VF index ranges
+      ansible.builtin.assert:
+        that:
+          - item.numvfs | int >= 0
+          - item.passthrough_vf_indexes | length == (item.passthrough_vf_indexes | unique | length)
+          - item.passthrough_vf_indexes | length == 0 or (item.passthrough_vf_indexes | min) >= 0
+          - item.passthrough_vf_indexes | length == 0 or (item.passthrough_vf_indexes | max) < (item.numvfs | int)
+        fail_msg: "Invalid VF configuration for interface {{ item.interface }}."
+      loop: "{{ sriov_vf_manage_effective_pf_configs }}"
+
+    - name: Read sriov_totalvfs for each managed PF
+      ansible.builtin.command: "cat /sys/class/net/{{ item.interface }}/device/sriov_totalvfs"
+      loop: "{{ sriov_vf_manage_effective_pf_configs }}"
+      register: sriov_vf_manage_totalvfs
+      changed_when: false
+      check_mode: false
+
+    - name: Validate requested numvfs does not exceed sriov_totalvfs
+      ansible.builtin.assert:
+        that:
+          - (item.0.numvfs | int) <= (item.1.stdout | trim | int)
+        fail_msg: >-
+          Requested numvfs={{ item.0.numvfs }} exceeds totalvfs={{ item.1.stdout | trim }}
+          for interface {{ item.0.interface }}.
+      loop: "{{ sriov_vf_manage_effective_pf_configs | zip(sriov_vf_manage_totalvfs.results) | list }}"
+
+    - name: Deploy SR-IOV lifecycle script
+      ansible.builtin.template:
+        src: "sriov-vf-manage.sh.j2"
+        dest: "{{ sriov_vf_manage_script_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+
+    - name: Deploy SR-IOV lifecycle systemd service
+      ansible.builtin.template:
+        src: "sriov-vf-manage.service.j2"
+        dest: "/etc/systemd/system/{{ sriov_vf_manage_service_name }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+    - name: Reload systemd daemon
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: not ansible_check_mode
+
+    - name: Enable and start SR-IOV lifecycle service
+      ansible.builtin.systemd:
+        name: "{{ sriov_vf_manage_service_name }}"
+        enabled: true
+        state: started
+      when: not ansible_check_mode and sriov_vf_manage_enable_service | bool
+
+    - name: Apply SR-IOV lifecycle script immediately
+      ansible.builtin.command: "{{ sriov_vf_manage_script_path }}"
+      when:
+        - sriov_vf_manage_apply_now | bool
+        - not ansible_check_mode
+      changed_when: true
