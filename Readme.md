@@ -4,6 +4,10 @@
 
 It is destructive. The two matched disks are repartitioned and wiped.
 
+The installed system uses ZFS for the root filesystem and ESP mirroring. It does not use Grub. Instead, it uses the upstream prebuilt ZFSBootMenu UEFI image to boot. This means a few workflows on default Debian systems change. You cannot use the Grub defaults to change boot commandline supplied kernel parameters. It also builds the target initramfs with `dracut` and `zfs-dracut` instead of the Debian `initramfs-tools` stack.
+
+For these reasons some Ansible roles are included in this repository. Namely `roles/zfsbootmenu_manage` to manage the ZFSBootMenu installation and kernel command line configuration on the installed system, and `roles/sriov_vf_manage` to manage SR-IOV VF lifecycle on `stein` without needing to reconfigure the whole boot stack.
+
 ## What It Does
 
 - Matches exactly two target disks by name/model substring and size substring.
@@ -219,7 +223,7 @@ Use this after updating `zfs-root-menu.sh` in the live environment when you want
 
 ## Ansible Workflow (Stein)
 
-This repo now includes an Ansible role and runtime config to manage the same boot pipeline on `stein`:
+This repo now includes an Ansible role and runtime config to manage the same boot pipeline on `stein` (change it to match your hostname if needed). This allows you to apply the same ZFSBootMenu management logic idempotently after the initial install, and also to manage SR-IOV VF lifecycle separately from the boot stack.:
 
 - inventory: `inventory.yml`
 - config: `ansible.cfg`
