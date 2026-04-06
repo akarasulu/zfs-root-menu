@@ -41,6 +41,25 @@ Current `host_vars/stein.yml` behavior:
 - does not run `generate-zbm` automatically
 - snapshots are pruned automatically when the run reports no changes
 
+Current boot-selection policy on `stein`:
+
+- ZBM config includes `zbm.timeout=3 zbm.prefer=zroot!`
+- dataset commandline includes all existing VFIO/ARC/console/hostid parameters plus:
+  - `zbm.timeout=3`
+  - `zbm.prefer=zroot!`
+- pool bootfs policy:
+  - `zroot bootfs=zroot/ROOT/trixie`
+  - `zraid bootfs=-`
+  - `backup bootfs=-`
+
+Important mount layout note:
+
+- `stein` mounts `/boot/efi` (and `/boot/efi2`) but does not mount `/boot`.
+- For this layout, set `zbm_manage_config.Global.BootMountPoint: /`.
+- If `BootMountPoint` is `/boot` without an `/etc/fstab` entry, `generate-zbm` fails with:
+  - `mount: /boot: can't find in /etc/fstab`
+  - `Unable to mount /boot`
+
 Current SR-IOV profile on `stein`:
 
 - `eno1`: `numvfs=4`
@@ -126,3 +145,11 @@ ssh root@stein 'zfs rollback -r zroot/ROOT/trixie@pre-vfio-passthru-20260329-082
 
 If you need full pool-wide rollback, perform rollback per affected dataset from the same snapshot tag.
 Do this only during controlled downtime.
+
+## Change History
+
+- 2026-04-06:
+  - Added explicit boot preference for `zroot/ROOT/trixie` using `zbm.prefer=zroot!` and `zbm.timeout=3`.
+  - Confirmed existing VFIO and ARC kernel parameters remain intact.
+  - Updated `BootMountPoint` to `/` on `stein` to support `/boot/efi`-only mount layout.
+  - Added missing Perl runtime dependencies required by `generate-zbm`.

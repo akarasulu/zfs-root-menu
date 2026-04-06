@@ -333,6 +333,7 @@ ssh root@stein 'SNAP_TAG=$(zfs list -H -t snapshot -o name -s creation | sed -n 
 
 ## Known Pitfalls
 
+- If a host has `/boot/efi` but no `/boot` mount, `generate-zbm` can fail unless `BootMountPoint` is set to `/` in `/etc/zfsbootmenu/config.yaml` (or via `zbm_manage_config`).
 - PTYs can break if `/dev`, `/proc`, and `/sys` are bind-mounted into the target chroot without `rslave` propagation controls. This was fixed in the script, but it is the first thing to suspect if `sudo` starts failing after the installer runs.
 - A guest NIC can look configured inside the VM while still being unusable if the host-side bridge or libvirt network backing it is dead. Verify both guest routes and host attachment.
 - Hostid mismatches between the pool and `/etc/hostid` can cause confusing import behavior. The installer now writes `spl_hostid=` into the ZFSBootMenu command line to keep pool import consistent.

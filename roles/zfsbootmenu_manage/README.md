@@ -5,6 +5,7 @@ Installs and manages local ZFSBootMenu build tooling on Debian hosts so `generat
 ## Behavior
 
 - Installs dependencies: `git`, `make`, `dracut`, `zfs-dracut`
+- Installs `generate-zbm` runtime Perl deps: `libsort-versions-perl`, `libyaml-pp-perl`, `libboolean-perl`
 - Clones `zbm-dev/zfsbootmenu` into `/opt/zfsbootmenu-src`
 - Runs `make` only when needed (new checkout/update/missing binary/forced rebuild)
 - Installs `generate-zbm` to `/usr/local/sbin/generate-zbm`
@@ -59,6 +60,7 @@ zbm_manage_vfio_ids:
 - `zbm_manage_config_content`: raw YAML string override for `config.yaml`
 - `zbm_manage_config`: structured config when not using raw content override
 - `zbm_manage_required_mountpoints`: defaults to `[/boot/efi]` (safe for hosts where `/boot` is not a separate mount)
+- `zbm_manage_config.Global.BootMountPoint`: set to `/` on hosts that do not mount `/boot`
 - `zbm_manage_kernel_commandline_tokens`: base kernel parameters
 - `zbm_manage_kernel_commandline_extra_tokens`: append extra parameters (VF/NIC/GPU use cases)
 - `zbm_manage_enable_efi_mirror_sync`: enable/disable ESP mirror sync management

@@ -114,3 +114,20 @@ zbm_manage_kernel_commandline_extra_tokens:
 
 - Role intentionally does not modify EFI boot NVRAM entries.
 - `generate-zbm` remains explicit unless enabled by variables.
+- `generate-zbm` runtime requires Perl modules provided by:
+  - `libsort-versions-perl`
+  - `libyaml-pp-perl`
+  - `libboolean-perl`
+- On hosts that only mount `/boot/efi` and do not mount `/boot`, set:
+  - `zbm_manage_config.Global.BootMountPoint: /`
+  - otherwise `generate-zbm` may fail while trying to mount `/boot`.
+
+## Stein History
+
+- 2026-04-06:
+  - Added `zbm.timeout=3` and `zbm.prefer=zroot!` on `stein`.
+  - Kept existing VFIO/ARC/console/hostid kernel parameters in dataset commandline.
+  - Pinned pool bootfs policy to:
+    - `zroot: zroot/ROOT/trixie`
+    - `zraid: -`
+    - `backup: -`

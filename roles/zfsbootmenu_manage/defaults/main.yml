@@ -4,6 +4,9 @@ zbm_manage_packages:
   - make
   - dracut
   - zfs-dracut
+  - libsort-versions-perl
+  - libyaml-pp-perl
+  - libboolean-perl
 
 zbm_manage_repo_url: "https://github.com/zbm-dev/zfsbootmenu.git"
 zbm_manage_repo_version: "master"
